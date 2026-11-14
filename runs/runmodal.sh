@@ -66,4 +66,4 @@ fi
 echo ""
 echo "Starting Modal run (runs/modal_run.py, mode=$MODE)..."
 echo ""
-modal run runs/modal_run.py --mode "$MODE"
+NANOCHAT_MODAL_MODE="$MODE" modal run runs/modal_run.py --mode "$MODE"

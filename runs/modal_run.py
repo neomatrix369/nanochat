@@ -10,12 +10,15 @@ CRITICAL: Do not import nanochat.dataset at module level (binds DATA_DIR at impo
 Set NANOCHAT_BASE_DIR in environment before any python -m calls.
 """
 
+import json
 import os
+import resource
 import subprocess
 import threading
 import time
 
 import modal
+from modal_stats import parse_memory_max, summarize_run
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Modal app, Volume and sizing
@@ -34,6 +37,10 @@ CPU_TRAIN_TIMEOUT = 3 * 60 * 60
 CPU_CORES = 64  # heavy machine: CPU mode is meant to use every core the account allows
 CPU_MEMORY_MIB = 131072  # 128 GiB
 
+# GPU functions are only defined in GPU mode. Modal checks every function in the app at
+# start-up, so a GPU function in a CPU run fails the whole run (H100 payment gate).
+MODAL_MODE = os.environ.get("NANOCHAT_MODAL_MODE", "cpu")
+
 
 def _nanochat_image(extra: str) -> modal.Image:
     """Image with the uv-synced deps for one extra (gpu or cpu). Local source is the last layer."""
@@ -47,6 +54,7 @@ def _nanochat_image(extra: str) -> modal.Image:
             {
                 "PATH": "/root/nanochat/.venv/bin:/usr/local/bin:/usr/bin:/bin",
                 "PYTHONPATH": "/root/nanochat",
+                "NANOCHAT_MODAL_MODE": extra,  # gates GPU function definitions in containers too
             }
         )
         # Local source is the LAST layer: Modal rejects build steps after add_local_*.
@@ -229,6 +237,36 @@ def _run_training(script: str, extra_env: dict[str, str]) -> None:
         raise RuntimeError(f"{script} failed with exit code {result.returncode}")
 
 
+def _read_memory_limit() -> int | None:
+    """Container memory limit from cgroup v2, or None if unlimited or unreadable."""
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            return parse_memory_max(f.read())
+    except OSError:
+        return None
+
+
+def _report_run(started: float, cores: int, timeout_s: int, name: str) -> None:
+    """Print and store what the run used vs what was configured, so sizing can be tuned."""
+    children = os.times()
+    report = summarize_run(
+        wall_s=time.time() - started,
+        child_cpu_s=children.children_user + children.children_system,
+        cores_requested=cores,
+        peak_rss_kb=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
+        memory_limit_bytes=_read_memory_limit(),
+        timeout_s=timeout_s,
+    )
+    report["cores_configured"] = CPU_CORES
+    report["memory_configured_gib"] = CPU_MEMORY_MIB / 1024
+    print("[report] " + json.dumps(report, indent=2))
+    out_dir = os.path.join(BASE_DIR, "run_stats")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, f"{name}.json"), "w") as f:
+        json.dump(report, f, indent=2)
+    vol.commit()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CPU mode: runcpu.sh on a heavy CPU machine (no GPU)
 
@@ -248,28 +286,33 @@ def prefetch_cpu() -> None:
 )
 def train_cpu() -> None:
     """CPU train: runcpu.sh using every core in this container, same commit protocol."""
-    _run_training("runs/runcpu.sh", {"OMP_NUM_THREADS": str(_available_cores())})
+    cores = _available_cores()
+    started = time.time()
+    try:
+        _run_training("runs/runcpu.sh", {"OMP_NUM_THREADS": str(cores)})
+    finally:
+        _report_run(started, cores, CPU_TRAIN_TIMEOUT, "cpu_train")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GPU mode: speedrun.sh on 8×H100
+# GPU mode: speedrun.sh on 8×H100 (defined only when NANOCHAT_MODAL_MODE=gpu)
 
+if MODAL_MODE == "gpu":
 
-@app.function(timeout=PREFETCH_TIMEOUT, volumes={BASE_DIR: vol}, image=image)
-def prefetch() -> None:
-    """GPU-mode prefetch: 170 shards (what speedrun.sh needs)."""
-    _run_prefetch(PREFETCH_SHARDS_GPU)
+    @app.function(timeout=PREFETCH_TIMEOUT, volumes={BASE_DIR: vol}, image=image)
+    def prefetch() -> None:
+        """GPU-mode prefetch: 170 shards (what speedrun.sh needs)."""
+        _run_prefetch(PREFETCH_SHARDS_GPU)
 
-
-@app.function(
-    image=image,
-    gpu="H100:8",
-    timeout=GPU_TRAIN_TIMEOUT,
-    volumes={BASE_DIR: vol},
-)
-def train() -> None:
-    """GPU train: speedrun.sh with SKIP_SETUP=1 and wait-for-ack hooks."""
-    _run_training("runs/speedrun.sh", {})
+    @app.function(
+        image=image,
+        gpu="H100:8",
+        timeout=GPU_TRAIN_TIMEOUT,
+        volumes={BASE_DIR: vol},
+    )
+    def train() -> None:
+        """GPU train: speedrun.sh with SKIP_SETUP=1 and wait-for-ack hooks."""
+        _run_training("runs/speedrun.sh", {})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +342,8 @@ def _download_artifacts() -> None:
 def main(mode: str = "cpu") -> None:
     if mode not in MODES:
         raise SystemExit(f"Unknown mode {mode!r}: use --mode cpu or --mode gpu")
+    if mode != MODAL_MODE:
+        raise SystemExit(f"--mode {mode} needs NANOCHAT_MODAL_MODE={mode}; use runs/runmodal.sh")
     prefetch_fn, train_fn = (prefetch_cpu, train_cpu) if mode == "cpu" else (prefetch, train)
     label = "CPU (runcpu, heavy machine)" if mode == "cpu" else "GPU (speedrun, 8×H100)"
     print("═" * 80)
