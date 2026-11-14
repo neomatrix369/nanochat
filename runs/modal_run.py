@@ -14,10 +14,18 @@ import json
 import os
 import resource
 import subprocess
+import sys
 import threading
 import time
 
 import modal
+
+# modal_stats lives next to this file locally and under /root/nanochat/runs in the container.
+# Put both on sys.path so the import works in either place.
+for _runs_dir in (os.path.dirname(os.path.abspath(__file__)), "/root/nanochat/runs"):
+    if _runs_dir not in sys.path:
+        sys.path.insert(0, _runs_dir)
+
 from modal_stats import parse_memory_max, summarize_run
 
 # ─────────────────────────────────────────────────────────────────────────────
