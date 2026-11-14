@@ -1,23 +1,33 @@
-# Training on Modal (Cloud GPU)
+# Training on Modal (Cloud CPU or GPU)
 
-Train a GPT-2-grade LLM on Modal's 8×H100 GPU cluster. This guide covers the quickest path from zero to a working chat model.
+Train a small LLM on Modal (`MODE=cpu`, the default) or a GPT-2-grade LLM on Modal's 8×H100 GPU cluster (`MODE=gpu`). This guide covers the quickest path from zero to a working chat model.
+
+| Mode | Runs | Machine | Needs |
+|------|------|---------|-------|
+| `cpu` (default) | `runs/runcpu.sh` (small profile, depth 6) | Up to 64 cores / 128 GiB, no GPU | Modal account, `modal` CLI |
+| `gpu` | `runs/speedrun.sh` (GPT-2-grade, depth 24) | 8×H100 | The above, plus an 8×H100 entitlement and a Modal payment method |
 
 ## Prerequisites
 
 You need these **once per account**:
 
 1. **Modal account** — sign up at [modal.com](https://modal.com)
-2. **8×H100 entitlement** — Modal needs to grant this (request in the dashboard or contact support; new accounts may default to smaller GPU pools)
+2. **8×H100 entitlement** (GPU mode only) — Modal needs to grant this (request in the dashboard or contact support; new accounts may default to smaller GPU pools)
 3. **Local `modal` CLI** — install with `pip install modal` or `uv tool install modal`, then run `modal setup` (this authenticates your CLI to your Modal account)
 
 You do not need a local GPU to run training on Modal, but you do need enough local disk and RAM to download the trained model afterward (see [Chat locally](#chat-locally) below).
 
 ## Cost and time
 
+**CPU mode (`MODE=cpu`):** cost scales with cores. Check Modal's current CPU price with `modal billing rates` before the first run. Time and cost are not measured yet; the first run records both in its run record.
+
+**GPU mode (`MODE=gpu`):**
 - **Cost:** ~$40–60 for a full run (~$3/GPU/hr × 8 GPUs × ~1.5–2h training)
   - First run is higher: Modal builds a Docker image and compiles PyTorch, adding ~0.5–1h and proportional cost
   - Later runs reuse the image and cost less
 - **Wall-clock time:** ~1.5–2h training, plus ~30 min prefetch (CPU) and ~15 min image build (first run only)
+
+For both modes:
   - Keep your laptop awake; the job is attached to your terminal
   - Use `screen` or `tmux` if you expect network drops (see [RUNNING.md](RUNNING.md) for tmux tips)
 
@@ -26,15 +36,16 @@ The script shows cost and time estimates before charging anything and asks for c
 ## One command
 
 ```bash
-bash runs/runmodal.sh
+bash runs/runmodal.sh                 # CPU mode (default)
+MODE=gpu bash runs/runmodal.sh        # GPU mode
 ```
 
 The script:
 1. Checks that `modal` is installed and configured
-2. Shows a cost/time banner and asks `Proceed? [y/N]`
-3. Runs the training pipeline on Modal:
-   - **Prefetch** (CPU on Modal): downloads 170 shards of ClimbMix data to a Modal Volume (~17 GB)
-   - **Train** (8×H100): runs speedrun.sh with GPU training (~1.5–2h)
+2. Shows a mode banner with cost and time estimates and asks `Proceed? [y/N]`
+3. Runs the pipeline on Modal:
+   - **Prefetch** (CPU on Modal): downloads the training data shards to a Modal Volume (8 shards in CPU mode, 170 in GPU mode)
+   - **Train**: `runcpu.sh` on the CPU machine (CPU mode), or `speedrun.sh` on 8×H100 (GPU mode)
    - **Download**: pulls the trained tokenizer and SFT checkpoints back to your laptop under `~/.cache/nanochat-modal`
    - **Print local chat tip**: shows the command to chat with your model locally
 
@@ -43,9 +54,11 @@ For scripted/automated runs, skip the confirmation with:
 RUNMODAL_YES=1 bash runs/runmodal.sh
 ```
 
+Each run gets an id (`<UTC time>-<mode>`). Its archive and run record are on the Volume under `runs/<run-id>/`. To check a run from the terminal without changing it, use `bash runs/modal_peek.sh` (commands are listed in the script's header: `status`, `apps`, `past`, `report`, `compare`, `pull`, `info`, `logs`, `container`, `cost`).
+
 ## What happens inside
 
-The job is split into stages, each marked in a persistent Modal Volume so re-runs can skip finished work:
+The job is split into stages, each marked in a persistent Modal Volume so re-runs can skip finished work. The table shows the GPU profile; the CPU profile runs the same stages with smaller settings.
 
 | Stage | What it does | Artifact(s) |
 |-------|--------------|-----------|
@@ -124,12 +137,12 @@ In the `runs/` directory:
 
 | Script | What it does | Modal? |
 |--------|--------------|--------|
-| `speedrun.sh` | Full 8×H100 training (the MVP) | **Yes** — this is what Modal wraps |
-| `runcpu.sh` | Tiny demo (depth 6) for laptops | No — local CPU/MPS only |
+| `speedrun.sh` | Full 8×H100 training (the MVP) | **Yes** — `MODE=gpu` |
+| `runcpu.sh` | Small demo (depth 6) on a CPU machine | **Yes** — `MODE=cpu` (default); also runs locally on a laptop |
 | `miniseries.sh` | Research sweep over multiple depths | Later (not in MVP) |
 | `scaling_laws.sh` | FLOPs×depth grid | Later (not in MVP) |
 
-Modal always uses `speedrun.sh` via `runmodal.sh`. Do not try to run `runcpu.sh` on Modal; it uses a different compute profile and will not produce a useful model.
+`runmodal.sh` picks the script from `MODE`. Modal's CPU mode runs on a larger machine than a laptop. Its speed against the laptop has not been measured yet. The model is still small and is not a GPT-2-grade model.
 
 ## How Modal optionality works
 
@@ -137,9 +150,10 @@ When you run locally (without Modal env vars set):
 - `bash runs/runcpu.sh` — uses `~/.cache/nanochat`, full CPU/MPS bootstrap, no Modal
 - `bash runs/speedrun.sh` — uses `~/.cache/nanochat`, full GPU bootstrap, no Modal
 
-When Modal runs `speedrun.sh` internally:
-- Modal sets env vars (`NANOCHAT_BASE_DIR`, `SKIP_SETUP`, `NANOCHAT_POST_STAGE_HOOK`)
+When Modal runs `runcpu.sh` or `speedrun.sh` internally:
+- Modal sets env vars (`NANOCHAT_BASE_DIR`, `SKIP_SETUP`, `NANOCHAT_POST_STAGE_HOOK`, and `NANOCHAT_RUN_ID` / `NANOCHAT_RUN_DIR` for the run record)
 - Same script reuses the volume path and skips venv setup (the image has deps pre-installed)
+- CPU-only tuning (`NANOCHAT_RUNCPU_*`) applies to CPU mode and does not reach the GPU job
 - No code duplication; the shell scripts adapt via environment variables
 
 Your local runs are never affected by Modal's env vars, and Modal artifacts never collide with local caches.
