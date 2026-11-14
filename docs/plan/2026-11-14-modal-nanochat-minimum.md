@@ -207,6 +207,42 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 
 **Done when:** a run writes `runs/<id>/` with all five items above, `compare` shows two runs side by side, and the archived checkpoints match the manifest checksums.
 
+## 1d. Session review: what went wrong or was not planned (2026-11-14)
+
+Recorded so the plan matches what happened. Status is as of commit `8c28ee9`.
+
+| # | What happened | Impact | Status | Action |
+|---|---------------|--------|--------|--------|
+| 1 | Plan assumed H100 was the only path. Modal checks every function in the app at start-up, so a GPU function in the same file blocked CPU runs (two failed launches, nothing billed) | Two wasted launches | Fixed `ddcb265` | GPU functions defined only in GPU mode. Add a check that CPU mode loads with no GPU function present |
+| 2 | Image had a build step after local files (`.env` after `add_local_dir`); Modal rejected the build | One failed image build | Fixed `9eed864` | Keep local source the last layer. Covered in §0 image recipe |
+| 3 | `modal_stats` import failed inside the container (`runs/` not on the container's `sys.path`) | Run failed at function start | Fixed `799263a` | Test imports in the container layout, not only locally |
+| 4 | `modal_hook.sh` run by hand died with an unbound variable; `help` started the wait loop | Confusing error; could hang 10 min | Fixed `c1693b8` | Help exits early; clear error if run outside a Modal run |
+| 5 | Peek script required an app id, and `logs`/`container` printed a snapshot, not a live feed | Friction on every check | Fixed `cc1e496`, `acc0d77` | Default to current run; `-f` streams |
+| 6 | Timing gate missed. 64-core run projected ~8 h against a 3 h cap; found after launch | One run wasted (stopped) | Cap now 12 h | Measure step time in a short probe before launching a long run |
+| 7 | Cost estimate (about $4/h, 64 cores) came from a search summary, not Modal's pricing page | Cost may be off | Open | Check `modal billing rates` before each billable run |
+| 8 | `modal app stop` asks for confirmation; no terminal in this session, so stops failed until `--yes` | Stop appeared to succeed when it had not | Fixed in practice | Scripts that stop runs must pass `--yes` only after explicit approval |
+| 9 | Failed and stopped apps accumulate (one zero-task ephemeral app left from 12:29) | Clutter; no billing | Open | Stop the leftover app with approval; add a cleanup command |
+| 10 | Background launches used a pointer file (`current_log_path`) that went stale, so log checks read an old run | Wrong log read twice | Open | Write the log path into the run folder (done in §1c archive) |
+| 11 | Test counts changed between runs (142/16, 140/18, 143, 149, 153) with no test changes against master | Unexplained variation | Open | Pin the test environment; investigate FA3 skip logic |
+| 12 | `pytest-cov` and `ruff` are not in the project env | Coverage and lint need extra tools | Open | Add as dev extras, or document `uvx`/`--with` |
+| 13 | Earlier plan said "never runcpu on Modal" and FAQ repeated it; reversed mid-session | Docs contradicted each other for a while | Fixed | FAQ and §1a updated; handoff rewritten |
+| 14 | Old runs (before `8c28ee9`) left no archive, and their checkpoints were overwritten on the Volume | No history for runs 1–5 | Accepted | Run 6 onward is archived; document the gap (§1c limits) |
+| 15 | `timeout`-killed runs skip the `finally` block, so no report or archive is written | A capped run leaves no report | Open | Write periodic checkpoints of the report; add a `status: killed` marker |
+| 16 | Step timings were never checked against a finished run | Speed claims unverified | Open | Confirm on run 6 (`compare`) |
+| 17 | Core and memory request accepted: 64 cores confirmed in container (`nproc`), 128 GiB not yet confirmed | Partly verified | Partly | Confirm from `report.json` memory fields |
+| 18 | GPU path has no config, report or archive yet | GPU runs would not be comparable | Open | Port §1c to `train()` in the GPU phase |
+| 19 | `modal app stop` billing stop not verified | Billing claim unverified | Open | Check `modal billing summary` after a stop |
+| 20 | Chat tip on the Mac not run; checkpoint never downloaded | End-to-end check missing | Open | Run after run 6 with `pull` and `chat_cli` |
+| 21 | Reviews: `03d0c4d`, `9eed864`, `31974eb`, `3c6ba61`, `ddcb265` and later are not reviewed | Unreviewed code on the branch | Open | Request review before the PR |
+| 22 | Pull request: PR #14 is merged; this branch has ~20 new commits with no open PR; draft title awaits confirmation | No review trail for new work | Open | Open the PR after confirmation (`/create-pr`) |
+| 23 | Duration format changed twice (`475.4m`, then `H h M m S s`, then `Hh Mm Ss`) | Rework | Fixed | Compact `Hh Mm Ss` in logs |
+| 24 | I stated facts about Modal's behaviour (start-up checks, `finally` on stop) from observation, not from Modal docs | Some claims may be wrong | Open | Check against Modal docs before relying on them |
+| 25 | Ruff reports 12 issues in older `tests/` files, which were not touched in this phase | Noise in lint output | Open | Separate cleanup, not this phase |
+
+**Verified in this session:** CPU image builds on Modal (about 19 s); CPU functions create with no payment error; 64 cores visible in the container; peek script (`status`, `past`, `info`, `logs`, `container`, `-f`); run 5 reached step 40+ on the CPU path; local and Modal config resolution (batch 8/5000 locally, 32/5000 on Modal).
+
+**Not yet verified:** the full CPU run end to end, `report.json` on a finished run, the chat tip on the Mac, billing stop, and `compare` output with data.
+
 ## 2. Non-goals
 
 - Multi-node clusters; vendoring community modal fork
