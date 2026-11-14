@@ -155,6 +155,28 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 
 **Phase B (GPU, `MODE=gpu`):** `speedrun` on `gpu="H100:8"`, needs the payment method, §0–§10.
 
+## 1b. Observability from the CLI (no dashboard needed)
+
+**Why:** a live run should be checkable from a terminal (is it running, what is it using, what does the log say, what is it costing). The dashboard stays as a fallback.
+
+**Read-only commands (no cost):**
+
+| Question | Command |
+|----------|---------|
+| Which apps are running / recently stopped? | `modal app list` |
+| What is one app doing (functions, lifecycle)? | `modal app info <app-id>` |
+| Live logs for an app | `modal app logs <app-id>` |
+| Which containers are up right now? | `modal container list` |
+| Logs for one container | `modal container logs <container-id>` |
+| Aggregate stats for an app name | `modal app stats <app-name>` |
+| What have I spent? | `modal billing summary` (rates: `modal billing rates`) |
+
+**Stop and inspect (acts on a run):** `modal app stop <app-id>` ends the app and its containers. `modal container stop <container-id>` ends one container. Use these only with the user's go-ahead.
+
+**Planned helper (todo):** `runs/modal_peek.sh` wraps the read-only commands in one entry point: `status` (apps + containers), `logs <app-id>`, `info <app-id>`, `cost`. It never stops anything. It is a thin wrapper, so it changes no behaviour and needs no GPU.
+
+**Verified on the live CPU run (2026-11-14):** `modal app list` and `modal container list` both returned the running `nanochat-speedrun` app and its container.
+
 ## 2. Non-goals
 
 - Multi-node clusters; vendoring community modal fork
