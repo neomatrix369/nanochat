@@ -243,6 +243,31 @@ Recorded so the plan matches what happened. Status is as of commit `8c28ee9`.
 
 **Not yet verified:** the full CPU run end to end, `report.json` on a finished run, the chat tip on the Mac, billing stop, and `compare` output with data.
 
+## 1e. Session review: GPU phase, shell fixes and merge gate (2026-11-14, earlier)
+
+§1d covers the CPU phase. This section covers what went wrong earlier in the same session, before the pivot. Status is as of `8c28ee9`.
+
+| # | What happened | Impact | Status | Action |
+|---|---------------|--------|--------|--------|
+| 1 | Shell stream (`4d60902`) was committed before the test run. Bare `uv run pytest` then failed collection (`No module named nanochat`); tests passed only with `uv run python3 -m pytest` | A commit landed unverified; the documented command misleads | Fixed: 142 passed after the fact | Run tests before each commit. Use `uv run python3 -m pytest`; fix the pytest path config |
+| 2 | §7 said the image uses `uv_sync` into `/root/nanochat/.venv`. The SDK's `Image.uv_sync` puts the venv at `/.uv/.venv`, so `SKIP_SETUP`'s activate would find nothing | Every Modal run would fail at activate | Fixed `8a0e51e`: explicit `uv sync` (§7 corrected below) | Check where any SDK helper writes its venv before relying on it |
+| 3 | Image `.env` set PATH to `…:$PATH`; Docker does not expand `$PATH` | Wrong PATH inside the image | Fixed `47dd588` (literal PATH) | Review image env literally |
+| 4 | `prefetch` had no `image=`; no `PYTHONPATH`. `add_local_dir` (copy=False) mounts at runtime, so build steps cannot follow it | Prefetch would fail on its first call | Fixed `8a0e51e` | Covered by reviews; add a container-layout test |
+| 5 | Commit daemon acked a failed `vol.commit()` (return value dropped), so the hook passed | A failed commit looked successful | Fixed `8a0e51e`: writes `.modal_commit_failed`, hook fails fast | Keep the failure path tested |
+| 6 | Hook idle check compared file mtime (epoch) with `$SECONDS`, so it never fired. No idle check before the first heartbeat | A dead daemon waited the full 600 s ceiling | Fixed `8a0e51e` and `03d0c4d` | Idle counts from hook start |
+| 7 | Daemon retried a failed commit in a tight loop | Spin until the hook exits | Fixed `03d0c4d` (after approval, not re-reviewed) | Review `03d0c4d` (see §1d #21) |
+| 8 | `miniseries.sh`: activate moved below the `python3` calls, so dataset and tok_train ran on system Python | Local-path regression | Fixed `8a0e51e` | Reviewer caught it; add a check for activate-before-python |
+| 9 | A pushed commit was amended (`afb79e9` → `626170c`), so local and remote diverged. Fixed by rebase and fast-forward; backup branch `backup/modal-pre-rebase` kept locally | Risk of a force-push over shared history | Resolved | Never amend after push |
+| 10 | PR #14 merged to `master` after approval, but `03d0c4d` was pushed after the approval and not re-reviewed | Unreviewed code on `master` | Open | Review `03d0c4d` (§1d #21) |
+| 11 | Reviewer "approvals" were local nWave agents. GitHub `reviewDecision` stayed empty, so the GitHub merge gate was never satisfied | The merge gate meant something different from what the PR suggested | Noted | Define the merge gate in the plan (below) |
+| 12 | An autonomous tick merged PR #14 once local reviewers approved. The user's instruction was "merge when approved" | Merge happened without a human looking at the final diff | Noted | Autonomous ticks must not merge to `master`; they stop at a PR |
+| 13 | §9.12 assumed a missing 8×H100 entitlement would fail early. The real blocker is that Modal requires a payment method before any H100 runs. §4 and §10 never listed it | GPU phase blocked; the plan did not say so | Covered by Phase A/B in §1a | Payment method is now a prerequisite (below) |
+| 14 | Docs for this slice went into two open PRs (#15 on the old branch, #16 on the new one) | Duplicate review surface | Open | Close #15 once #16 is accepted |
+| 15 | `HANDOFF.md` exists on `master` (from #16) and was rewritten on `feat` for the CPU phase | The next session may read the wrong handoff | Open | Keep one HANDOFF on the active branch; delete the other |
+| 16 | Parallel subagents built code from the plan with no shared contract. Reviewers, not tests, caught six blockers | A full review-fix cycle | Noted | Give each agent exact plan sections and acceptance checks; run reviewers before any PR |
+
+**Merge gate (decided here):** a PR merges to `master` only when (a) the user says so, (b) CI or local checks pass on the exact head commit, and (c) every reviewer that approved has seen that head commit. Autonomous runs open PRs and stop.
+
 ## 2. Non-goals
 
 - Multi-node clusters; vendoring community modal fork
@@ -278,7 +303,7 @@ bash runs/runmodal.sh
 # → tip: NANOCHAT_BASE_DIR=~/.cache/nanochat-modal python3 -m scripts.chat_cli -p "Why is the sky blue?"
 ```
 
-Prerequisites once: Modal account, `modal setup`, **8×H100** entitlement, local `modal` CLI (`pip install modal` or uv tool).
+Prerequisites once: Modal account, **payment method on the account** (Modal blocks H100 functions without one), `modal setup`, **8×H100** entitlement, local `modal` CLI (`uv tool install modal`). The CPU phase (§1a) runs without the H100 entitlement.
 
 Prerequisites for **chatting locally** (the tip at the end needs these; Modal alone is not enough):
 - Local Python env with torch: `uv sync --extra cpu` (same as `runcpu.sh`).
@@ -334,7 +359,7 @@ Chat minimum: `tokenizer/` + `chatsft_checkpoints/`. If SFT never finished, **do
 
 **Image recipe (required — pinned):**
 
-- Base: **`debian_slim` + Python 3.11** + `uv_sync(extras=["gpu"], frozen=True)` against lockfile (pytorch-cu128 wheels; Modal supplies host GPU drivers). Do **not** use `nvidia/cuda:12.4.1-devel` unless CUDA match with cu128 is proven.
+- Base: **`debian_slim` + Python 3.11** + `uv`, then an explicit `uv sync --no-install-project --extra gpu --frozen` into `/root/nanochat/.venv` against the lockfile (pytorch-cu128 wheels; Modal supplies host GPU drivers). Do **not** use the SDK's `Image.uv_sync`: it puts the venv at `/.uv/.venv`, which `SKIP_SETUP`'s activate does not find (§1e #2). Do **not** use `nvidia/cuda:12.4.1-devel` unless CUDA match with cu128 is proven.
 - Remote repo root: **`/root/nanochat`**. Last layer: `add_local_dir(".", remote_path="/root/nanochat", ignore=[".venv", ".git", "**/.pytest_cache", "**/__pycache__"])` so a local Mac cpu `.venv` cannot clobber the image.
 - Function `cwd="/root/nanochat"`. **`PYTHONPATH=/root/nanochat` required** (`uv_sync` is `--no-install-project`).
 - Invariant: the image provides `/root/nanochat/.venv` (gpu deps installed into it); `SKIP_SETUP=1` runs `source .venv/bin/activate`, so the venv must exist in the container.
