@@ -41,7 +41,12 @@ PREFETCH_TIMEOUT = 2 * 60 * 60
 PREFETCH_SHARDS_GPU = 170  # speedrun.sh needs ~170 shards
 PREFETCH_SHARDS_CPU = 8  # runcpu.sh needs 8 shards
 GPU_TRAIN_TIMEOUT = 4 * 60 * 60
-CPU_TRAIN_TIMEOUT = 3 * 60 * 60
+CPU_TRAIN_TIMEOUT = 4 * 60 * 60
+# Modal-only runcpu overrides (read by runs/runcpu.sh). Max micro-batch that keeps the 16384-token
+# total batch in one pass: 16384 / (32 * 512) = 1, so no grad accumulation.
+CPU_DEVICE_BATCH_SIZE = 32
+CPU_EVAL_DEVICE_BATCH_SIZE = 16
+CPU_NUM_ITERATIONS = 2000  # profile default 5000 would not fit the time cap on this machine
 CPU_CORES = 64  # heavy machine: CPU mode is meant to use every core the account allows
 CPU_MEMORY_MIB = 131072  # 128 GiB
 
@@ -297,7 +302,16 @@ def train_cpu() -> None:
     cores = _available_cores()
     started = time.time()
     try:
-        _run_training("runs/runcpu.sh", {"OMP_NUM_THREADS": str(cores)})
+        _run_training(
+            "runs/runcpu.sh",
+            {
+                "OMP_NUM_THREADS": str(cores),
+                "MKL_NUM_THREADS": str(cores),
+                "NANOCHAT_RUNCPU_DEVICE_BATCH_SIZE": str(CPU_DEVICE_BATCH_SIZE),
+                "NANOCHAT_RUNCPU_EVAL_DEVICE_BATCH_SIZE": str(CPU_EVAL_DEVICE_BATCH_SIZE),
+                "NANOCHAT_RUNCPU_NUM_ITERATIONS": str(CPU_NUM_ITERATIONS),
+            },
+        )
     finally:
         _report_run(started, cores, CPU_TRAIN_TIMEOUT, "cpu_train")
 

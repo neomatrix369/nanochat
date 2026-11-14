@@ -23,6 +23,11 @@ PROFILE=runcpu
 source "$(dirname "${BASH_SOURCE[0]}")/_stage_lib.sh"
 # Run knobs come from nanochat/defaults.py (PROFILE_RUNCPU); profiles.sh is its emitted shell form.
 source "$(dirname "${BASH_SOURCE[0]}")/profiles.sh"
+# Modal-only overrides: Modal sets NANOCHAT_RUNCPU_* on its CPU machine. Unset (local Mac/CPU)
+# keeps the profile values above, so local runs are unchanged.
+RUNCPU_DEVICE_BATCH_SIZE="${NANOCHAT_RUNCPU_DEVICE_BATCH_SIZE:-$RUNCPU_DEVICE_BATCH_SIZE}"
+RUNCPU_NUM_ITERATIONS="${NANOCHAT_RUNCPU_NUM_ITERATIONS:-$RUNCPU_NUM_ITERATIONS}"
+RUNCPU_EVAL_DEVICE_BATCH_SIZE="${NANOCHAT_RUNCPU_EVAL_DEVICE_BATCH_SIZE:-$RUNCPU_EVAL_DEVICE_BATCH_SIZE}"
 
 # Python venv setup: if SKIP_SETUP is set, skip uv/venv/sync (expect .venv to exist, e.g. the Modal image)
 if [ -z "${SKIP_SETUP:-}" ]; then
