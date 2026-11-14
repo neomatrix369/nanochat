@@ -30,6 +30,7 @@ from nanochat.defaults import DEFAULT_DEPTH, DEFAULT_DEVICE_BATCH_SIZE, DEFAULT_
 from nanochat.memory import auto_fit_echo_lines, auto_fit_enabled, empty_device_cache, fit_device_batch_size, format_oom_retry_line, is_out_of_memory_error, oom_after_rehalve_error, oom_rehalve_once, training_module_after_oom_rehalve
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.run_record import make_run_logger
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, maybe_torch_compile, format_duration
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
@@ -122,7 +123,7 @@ if auto_fit_enabled(args.auto_fit_batch, device_type):
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
+wandb_run = make_run_logger(DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config), config=user_config)
 
 # Flash Attention status
 from nanochat.flash_attention import USE_FA3

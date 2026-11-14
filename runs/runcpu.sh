@@ -36,6 +36,11 @@ if [ -z "${SKIP_SETUP:-}" ]; then
     uv sync --extra cpu
 fi
 set +u; source .venv/bin/activate; set -u
+# Run record: one folder per run (run.json, milestone events, spans). Modal sets these itself.
+export NANOCHAT_RUN_ID="${NANOCHAT_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-cpu}"
+export NANOCHAT_RUN_cpu="${NANOCHAT_RUN_cpu:-local-cpu}"
+export NANOCHAT_RUN_DIR="${NANOCHAT_RUN_DIR:-$NANOCHAT_BASE_DIR/runs/$NANOCHAT_RUN_ID}"
+python3 -m nanochat.run_record start "$NANOCHAT_RUN_DIR" --mode "$NANOCHAT_RUN_cpu" || echo "WARN: run record not started" >&2
 if [ -z "${WANDB_RUN:-}" ]; then
     WANDB_RUN=dummy
 fi

@@ -16,7 +16,7 @@
 #   bash runs/modal_peek.sh apps [N]                  last N Modal apps, incl. stopped (default 10)
 #   bash runs/modal_peek.sh past                      archived runs: local folders and Volume runs
 #   bash runs/modal_peek.sh report [run-id]           resource report of a run (default: latest)
-#   bash runs/modal_peek.sh compare                   one table of every run on the Volume
+#   bash runs/modal_peek.sh compare                   one table of every run on the Volume (from summary.json)
 #   bash runs/modal_peek.sh pull [run-id]             copy a run's config, report, manifest locally
 #   bash runs/modal_peek.sh info [app-id]             lifecycle, functions, state of an app
 #   bash runs/modal_peek.sh logs [app-id] [N] [-f]    last N log lines of an app (default 100); -f streams
@@ -164,46 +164,26 @@ case "$cmd" in
             echo "No runs on the Volume yet." >&2
             exit 1
         fi
-        # Build one row per run from its config.json and report.json.
+        # Copy each run's run.json + summary.json into a temp root, then use the one recorder
+        # table (nanochat/run_record.py) so local and Modal runs read the same way.
+        tmp_root=$(mktemp -d)
+        trap 'rm -rf "$tmp_root"' EXIT
         for run in $ids; do
-            cfg=$(volume_file "$run" config.json 2>/dev/null || echo "{}")
-            rep=$(volume_file "$run" report.json 2>/dev/null || echo "{}")
-            printf '%s\t%s\t%s\n' "$run" "$cfg" "$rep"
-        done | python3 -c '
-import json, sys
-header = ["run", "code", "cores", "batch", "iters", "wall", "timeout%", "avg cores", "peak GiB", "verdicts"]
-rows = [header]
-def pct(share):
-    return "-" if share is None else f"{share * 100:.0f}%"
-for line in sys.stdin:
-    run, cfg_s, rep_s = line.rstrip("\n").split("\t", 2)
-    cfg, rep = json.loads(cfg_s), json.loads(rep_s)
-    wall = rep.get("wall_s")
-    rows.append([
-        run,
-        cfg.get("code_rev", "?"),
-        str(cfg.get("cores", "?")),
-        str(cfg.get("device_batch_size", "?")),
-        str(cfg.get("num_iterations", "?")),
-        f"{int(wall // 3600)}h{int(wall % 3600 // 60):02d}m" if wall is not None else "running",
-        pct(rep.get("timeout_share")),
-        str(rep.get("avg_cores_busy", "-")),
-        str(rep.get("peak_rss_gib", "-")),
-        "; ".join(rep.get("verdicts", [])) or "-",
-    ])
-widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
-for r in rows:
-    print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
-'
+            mkdir -p "$tmp_root/$run"
+            for f in run.json summary.json; do
+                volume_file "$run" "$f" > "$tmp_root/$run/$f" 2>/dev/null || rm -f "$tmp_root/$run/$f"
+            done
+        done
+        (cd "$(dirname "$0")/.." && python3 -m nanochat.run_record compare "$tmp_root")
         ;;
     pull)
         run="${1:-$(latest_run)}"
         dest="$LOCAL_RUNS/$run"
         mkdir -p "$dest"
-        for f in config.json report.json manifest.json; do
+        for f in run.json summary.json events.jsonl config.json report.json manifest.json; do
             volume_file "$run" "$f" > "$dest/$f" 2>/dev/null || rm -f "$dest/$f"
         done
-        echo "Pulled $run into $dest (config, report, manifest). Checkpoints stay on the Volume."
+        echo "Pulled $run into $dest (run record, summary, events, config, report, manifest). Checkpoints stay on the Volume."
         ls -1 "$dest"
         ;;
     info)

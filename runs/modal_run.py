@@ -211,6 +211,16 @@ def _run_prefetch(shards: int) -> None:
     print("[prefetch] Volume committed.")
 
 
+def _run_record_env(run_id: str, mode: str, code_rev: str) -> dict[str, str]:
+    """Env that points a run's record at its Volume folder (run.json, events.jsonl, summary.json)."""
+    return {
+        "NANOCHAT_RUN_ID": run_id,
+        "NANOCHAT_RUN_MODE": mode,
+        "NANOCHAT_RUN_DIR": _run_dir(run_id),
+        "NANOCHAT_CODE_REV": code_rev,
+    }
+
+
 def _run_training(script: str, extra_env: dict[str, str]) -> None:
     """Run one stage script with the commit daemon, marker cleanup and final commit."""
     os.chdir("/root/nanochat")
@@ -304,6 +314,11 @@ def _archive_artifacts(run_id: str) -> None:
 
     Without this, the next run overwrites checkpoints, metrics and stage markers on the Volume.
     """
+    # Summary for every run, including ones that ended early (the trainer never called finish).
+    subprocess.run(
+        [sys.executable, "-m", "nanochat.run_record", "summary", _run_dir(run_id)],
+        cwd="/root/nanochat", capture_output=True, check=False,
+    )
     artifacts_dir = os.path.join(_run_dir(run_id), "artifacts")
     os.makedirs(artifacts_dir, exist_ok=True)
     manifest = []
@@ -382,6 +397,7 @@ def train_cpu(run_id: str, code_rev: str) -> None:
                 "NANOCHAT_RUNCPU_DEVICE_BATCH_SIZE": str(CPU_DEVICE_BATCH_SIZE),
                 "NANOCHAT_RUNCPU_EVAL_DEVICE_BATCH_SIZE": str(CPU_EVAL_DEVICE_BATCH_SIZE),
                 "NANOCHAT_RUNCPU_NUM_ITERATIONS": str(CPU_NUM_ITERATIONS),
+                **_run_record_env(run_id, "modal-cpu", code_rev),
             },
         )
     finally:
@@ -405,9 +421,9 @@ if MODAL_MODE == "gpu":
         timeout=GPU_TRAIN_TIMEOUT,
         volumes={BASE_DIR: vol},
     )
-    def train() -> None:
+    def train(run_id: str, code_rev: str) -> None:
         """GPU train: speedrun.sh with SKIP_SETUP=1 and wait-for-ack hooks."""
-        _run_training("runs/speedrun.sh", {})
+        _run_training("runs/speedrun.sh", _run_record_env(run_id, "modal-gpu", code_rev))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,7 +463,7 @@ def main(mode: str = "cpu", run_id: str = "", code_rev: str = "unknown") -> None
         train_args = (run_id, code_rev)
     else:
         train_call = train.remote
-        train_args = ()
+        train_args = (run_id, code_rev)
     label = "CPU (runcpu, heavy machine)" if mode == "cpu" else "GPU (speedrun, 8×H100)"
     print("═" * 80)
     print(f"nanochat on Modal, mode={mode}: {label}")

@@ -39,6 +39,11 @@ if [ -z "${SKIP_SETUP:-}" ]; then
 fi
 # activate venv (always happens; .venv must exist)
 set +u; source .venv/bin/activate; set -u
+# Run record: one folder per run (run.json, milestone events, spans). Modal sets these itself.
+export NANOCHAT_RUN_ID="${NANOCHAT_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-gpu}"
+export NANOCHAT_RUN_gpu="${NANOCHAT_RUN_gpu:-local-gpu}"
+export NANOCHAT_RUN_DIR="${NANOCHAT_RUN_DIR:-$NANOCHAT_BASE_DIR/runs/$NANOCHAT_RUN_ID}"
+python3 -m nanochat.run_record start "$NANOCHAT_RUN_DIR" --mode "$NANOCHAT_RUN_gpu" || echo "WARN: run record not started" >&2
 
 # Hard refuse on non-CUDA: speedrun launches 8-way depth-24 training that can wedged a laptop (OOM / kernel panic).
 if ! python3 -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
