@@ -41,12 +41,12 @@ PREFETCH_TIMEOUT = 2 * 60 * 60
 PREFETCH_SHARDS_GPU = 170  # speedrun.sh needs ~170 shards
 PREFETCH_SHARDS_CPU = 8  # runcpu.sh needs 8 shards
 GPU_TRAIN_TIMEOUT = 4 * 60 * 60
-CPU_TRAIN_TIMEOUT = 4 * 60 * 60
+CPU_TRAIN_TIMEOUT = 12 * 60 * 60  # worst-case bound; billing follows actual run time
 # Modal-only runcpu overrides (read by runs/runcpu.sh). Max micro-batch that keeps the 16384-token
 # total batch in one pass: 16384 / (32 * 512) = 1, so no grad accumulation.
 CPU_DEVICE_BATCH_SIZE = 32
 CPU_EVAL_DEVICE_BATCH_SIZE = 16
-CPU_NUM_ITERATIONS = 2000  # profile default 5000 would not fit the time cap on this machine
+CPU_NUM_ITERATIONS = 5000  # profile default; kept for model quality (timeout is set to fit it)
 CPU_CORES = 64  # heavy machine: CPU mode is meant to use every core the account allows
 CPU_MEMORY_MIB = 131072  # 128 GiB
 
