@@ -10,9 +10,11 @@ CRITICAL: Do not import nanochat.dataset at module level (binds DATA_DIR at impo
 Set NANOCHAT_BASE_DIR in environment before any python -m calls.
 """
 
+import hashlib
 import json
 import os
 import resource
+import shutil
 import subprocess
 import sys
 import threading
@@ -259,7 +261,76 @@ def _read_memory_limit() -> int | None:
         return None
 
 
-def _report_run(started: float, cores: int, timeout_s: int, name: str) -> None:
+def _run_dir(run_id: str) -> str:
+    """Volume folder for one run: config.json + report.json, kept for later comparison."""
+    return os.path.join(BASE_DIR, "runs", run_id)
+
+
+def _write_config(run_id: str, mode: str, code_rev: str, cores: int) -> None:
+    """Record the exact settings a run used, before it starts, so failed runs are still described."""
+    config = {
+        "run_id": run_id,
+        "mode": mode,
+        "code_rev": code_rev,
+        "profile": "runcpu",
+        "cores": cores,
+        "memory_gib": CPU_MEMORY_MIB / 1024,
+        "device_batch_size": CPU_DEVICE_BATCH_SIZE,
+        "eval_device_batch_size": CPU_EVAL_DEVICE_BATCH_SIZE,
+        "num_iterations": CPU_NUM_ITERATIONS,
+        "timeout_s": CPU_TRAIN_TIMEOUT,
+    }
+    out_dir = _run_dir(run_id)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+    vol.commit()
+
+
+# Everything a run leaves on the Volume that the next run would overwrite.
+ARCHIVE_ITEMS = ("tokenizer", "base_checkpoints", "chatsft_checkpoints", "last_metrics.json", ".stage_elapsed")
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _archive_artifacts(run_id: str) -> None:
+    """Copy this run's outputs into runs/<run-id>/artifacts and write a manifest with checksums.
+
+    Without this, the next run overwrites checkpoints, metrics and stage markers on the Volume.
+    """
+    artifacts_dir = os.path.join(_run_dir(run_id), "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    manifest = []
+    for item in ARCHIVE_ITEMS:
+        src = os.path.join(BASE_DIR, item)
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(artifacts_dir, item)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            files = [os.path.join(root, name) for root, _, names in os.walk(dst) for name in names]
+        else:
+            shutil.copy2(src, dst)
+            files = [dst]
+        for path in files:
+            manifest.append({
+                "path": os.path.relpath(path, artifacts_dir),
+                "bytes": os.path.getsize(path),
+                "sha256": _sha256(path),
+            })
+    with open(os.path.join(_run_dir(run_id), "manifest.json"), "w") as f:
+        json.dump({"run_id": run_id, "files": manifest}, f, indent=2)
+    print(f"[archive] {len(manifest)} files archived under runs/{run_id}/artifacts")
+    vol.commit()
+
+
+def _report_run(started: float, cores: int, timeout_s: int, run_id: str) -> None:
     """Print and store what the run used vs what was configured, so sizing can be tuned."""
     children = os.times()
     report = summarize_run(
@@ -273,9 +344,9 @@ def _report_run(started: float, cores: int, timeout_s: int, name: str) -> None:
     report["cores_configured"] = CPU_CORES
     report["memory_configured_gib"] = CPU_MEMORY_MIB / 1024
     print("[report] " + json.dumps(report, indent=2))
-    out_dir = os.path.join(BASE_DIR, "run_stats")
+    out_dir = _run_dir(run_id)
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, f"{name}.json"), "w") as f:
+    with open(os.path.join(out_dir, "report.json"), "w") as f:
         json.dump(report, f, indent=2)
     vol.commit()
 
@@ -297,9 +368,10 @@ def prefetch_cpu() -> None:
     timeout=CPU_TRAIN_TIMEOUT,
     volumes={BASE_DIR: vol},
 )
-def train_cpu() -> None:
+def train_cpu(run_id: str, code_rev: str) -> None:
     """CPU train: runcpu.sh using every core in this container, same commit protocol."""
     cores = _available_cores()
+    _write_config(run_id, "cpu", code_rev, cores)
     started = time.time()
     try:
         _run_training(
@@ -313,7 +385,8 @@ def train_cpu() -> None:
             },
         )
     finally:
-        _report_run(started, cores, CPU_TRAIN_TIMEOUT, "cpu_train")
+        _archive_artifacts(run_id)
+        _report_run(started, cores, CPU_TRAIN_TIMEOUT, run_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -361,12 +434,20 @@ def _download_artifacts() -> None:
 
 
 @app.local_entrypoint()
-def main(mode: str = "cpu") -> None:
+def main(mode: str = "cpu", run_id: str = "", code_rev: str = "unknown") -> None:
     if mode not in MODES:
         raise SystemExit(f"Unknown mode {mode!r}: use --mode cpu or --mode gpu")
     if mode != MODAL_MODE:
         raise SystemExit(f"--mode {mode} needs NANOCHAT_MODAL_MODE={mode}; use runs/runmodal.sh")
-    prefetch_fn, train_fn = (prefetch_cpu, train_cpu) if mode == "cpu" else (prefetch, train)
+    run_id = run_id or time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + f"-{mode}"
+    print(f"[local] run id: {run_id} (code {code_rev})")
+    prefetch_fn = prefetch_cpu if mode == "cpu" else prefetch
+    if mode == "cpu":
+        train_call = train_cpu.remote
+        train_args = (run_id, code_rev)
+    else:
+        train_call = train.remote
+        train_args = ()
     label = "CPU (runcpu, heavy machine)" if mode == "cpu" else "GPU (speedrun, 8×H100)"
     print("═" * 80)
     print(f"nanochat on Modal, mode={mode}: {label}")
@@ -374,7 +455,7 @@ def main(mode: str = "cpu") -> None:
     print("\n[local] Step 1: prefetch...")
     prefetch_fn.remote()
     print(f"[local] Step 2: train ({mode})...")
-    train_fn.remote()
+    train_call(*train_args)
     print("\n[local] Step 3: Downloading chat artifacts...")
     _download_artifacts()
     print("SUCCESS: training complete and artifacts downloaded.")

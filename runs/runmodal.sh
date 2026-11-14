@@ -66,4 +66,14 @@ fi
 echo ""
 echo "Starting Modal run (runs/modal_run.py, mode=$MODE)..."
 echo ""
-NANOCHAT_MODAL_MODE="$MODE" modal run runs/modal_run.py --mode "$MODE"
+# Every run gets an id and an archive folder: the full log is kept locally next to the Volume
+# copy (runs/<run-id>/config.json and report.json). The code revision ties results to the code.
+RUN_ID="$(date -u +%Y%m%d-%H%M%S)-$MODE"
+CODE_REV="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+ARCHIVE_ROOT="${NANOCHAT_MODAL_ARCHIVE:-$HOME/.cache/nanochat-modal/runs}"
+ARCHIVE_DIR="$ARCHIVE_ROOT/$RUN_ID"
+mkdir -p "$ARCHIVE_DIR"
+echo "Run id: $RUN_ID (code $CODE_REV). Local log: $ARCHIVE_DIR/run.log"
+echo ""
+NANOCHAT_MODAL_MODE="$MODE" modal run runs/modal_run.py --mode "$MODE" \
+    --run-id "$RUN_ID" --code-rev "$CODE_REV" 2>&1 | tee "$ARCHIVE_DIR/run.log"

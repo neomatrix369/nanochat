@@ -28,7 +28,12 @@ def fake_modal(tmp_path: Path) -> tuple[Path, Path]:
 
 def _run(fake_bin: Path, mode: str | None) -> subprocess.CompletedProcess[str]:
     """Run runmodal.sh non-interactively with the fake modal first on PATH."""
-    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "RUNMODAL_YES": "1"}
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "RUNMODAL_YES": "1",
+        "NANOCHAT_MODAL_ARCHIVE": str(fake_bin.parent / "archive"),
+    }
     env.pop("MODE", None)
     if mode is not None:
         env["MODE"] = mode
@@ -65,7 +70,9 @@ def test_defaults_to_cpu_mode(fake_modal: tuple[Path, Path]) -> None:
 
     # ### Then
     assert result.returncode == 0, result.stderr
-    assert record.read_text().split() == ["run", "runs/modal_run.py", "--mode", "cpu"]
+    argv = record.read_text().split()
+    assert argv[:4] == ["run", "runs/modal_run.py", "--mode", "cpu"]
+    assert "--run-id" in argv and "--code-rev" in argv
     assert "CPU mode" in result.stdout
 
 
@@ -82,6 +89,7 @@ def test_gpu_mode_passes_gpu_and_shows_gpu_cost(fake_modal: tuple[Path, Path]) -
 
     # ### Then
     assert result.returncode == 0, result.stderr
-    assert record.read_text().split() == ["run", "runs/modal_run.py", "--mode", "gpu"]
+    argv = record.read_text().split()
+    assert argv[:4] == ["run", "runs/modal_run.py", "--mode", "gpu"]
     assert "GPU mode" in result.stdout
     assert "8×H100" in result.stdout

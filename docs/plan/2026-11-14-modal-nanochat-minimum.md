@@ -177,6 +177,36 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 
 **Verified on the live CPU run (2026-11-14):** `modal app list` and `modal container list` both returned the running `nanochat-speedrun` app and its container.
 
+## 1c. Run archive and provenance (every run kept, nothing overwritten)
+
+**Why:** each run overwrites the last one on the Volume (`run_stats`, `last_metrics.json`, `.stage_elapsed`, checkpoints). Runs can't be compared, and results can't be traced to the code that made them. Found 2026-11-14.
+
+**Design:**
+
+| Where | What | Written by |
+|-------|------|------------|
+| Local `~/.cache/nanochat-modal/runs/<run-id>/run.log` | Full run log | `runs/runmodal.sh` (tee) |
+| Volume `runs/<run-id>/config.json` | Settings used: cores, memory, batch, eval batch, steps, timeout, code revision, mode | `train_cpu` at start |
+| Volume `runs/<run-id>/report.json` | Resource report: wall time, cores busy vs requested, peak memory, verdicts | `train_cpu` at end |
+| Volume `runs/<run-id>/manifest.json` | Every archived file with size and SHA-256 | `_archive_artifacts` |
+| Volume `runs/<run-id>/artifacts/` | Copy of tokenizer, base and SFT checkpoints, `last_metrics.json`, `.stage_elapsed` | `_archive_artifacts` |
+
+**Run id:** UTC timestamp plus mode, e.g. `20261114-130522-cpu`. **Code revision:** the short git commit that built the run, recorded in `config.json`.
+
+**Commands (`runs/modal_peek.sh`, read-only):**
+
+| Command | Shows |
+|---------|-------|
+| `past` | Archived runs: local folders (with code revision) and runs on the Volume |
+| `report [run-id]` | Resource report of one run (default: latest) |
+| `compare` | One table of every run: code, cores, batch, steps, wall time, timeout use, average cores busy, peak memory, verdicts |
+| `pull [run-id]` | Copy one run's config, report and manifest locally. Checkpoints stay on the Volume |
+| `apps [N]` | Modal apps (the old `past`) |
+
+**Limits:** runs started before this change (the 12:31 and 12:49 attempts, and the current 5000-step run) have no `runs/` folder. Their logs are in Modal's app logs, and their outputs were overwritten on the Volume.
+
+**Done when:** a run writes `runs/<id>/` with all five items above, `compare` shows two runs side by side, and the archived checkpoints match the manifest checksums.
+
 ## 2. Non-goals
 
 - Multi-node clusters; vendoring community modal fork

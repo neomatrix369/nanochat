@@ -1,20 +1,27 @@
 #!/bin/bash
 
-# Peek at Modal runs from the terminal. Read-only: it lists, reads logs and downloads the run
-# report. It never stops or changes anything (stop with `modal app stop <app-id>` by hand).
+# Peek at Modal runs from the terminal. Read-only: it lists, reads logs and downloads small
+# files (config, report, manifest). It never stops or changes anything (stop an app by hand
+# with `modal app stop <app-id>`).
+#
+# Runs: each CPU run has a run id (UTC timestamp + mode). Its full log is kept locally in
+# ~/.cache/nanochat-modal/runs/<run-id>/run.log; its config, report and manifest live on the
+# Volume under runs/<run-id>/. Checkpoints are archived in runs/<run-id>/artifacts on the Volume.
 #
 # If you leave out an app or container id, the script picks the current run: the newest
 # nanochat app that is running (preferring one with tasks), else the newest nanochat app.
-# It prints which one it picked.
 #
 # Usage:
-#   bash runs/modal_peek.sh status                 running apps + active containers
-#   bash runs/modal_peek.sh past [N]               last N apps, incl. recently stopped (default 10)
-#   bash runs/modal_peek.sh info [app-id]          lifecycle, functions, state of an app
-#   bash runs/modal_peek.sh logs [app-id] [N] [-f]      last N log lines of an app (default 100); -f streams live
-#   bash runs/modal_peek.sh container [ta-id] [N] [-f] last N log lines of a container; -f streams live
-#   bash runs/modal_peek.sh report                 CPU run report saved on the Volume (run_stats)
-#   bash runs/modal_peek.sh cost [PERIOD]          billing summary, e.g. "this month" or "last month"
+#   bash runs/modal_peek.sh status                    running apps + active containers
+#   bash runs/modal_peek.sh apps [N]                  last N Modal apps, incl. stopped (default 10)
+#   bash runs/modal_peek.sh past                      archived runs: local folders and Volume runs
+#   bash runs/modal_peek.sh report [run-id]           resource report of a run (default: latest)
+#   bash runs/modal_peek.sh compare                   one table of every run on the Volume
+#   bash runs/modal_peek.sh pull [run-id]             copy a run's config, report, manifest locally
+#   bash runs/modal_peek.sh info [app-id]             lifecycle, functions, state of an app
+#   bash runs/modal_peek.sh logs [app-id] [N] [-f]    last N log lines of an app (default 100); -f streams
+#   bash runs/modal_peek.sh container [ta-id] [N] [-f]  last N log lines of a container; -f streams
+#   bash runs/modal_peek.sh cost [PERIOD]             billing summary, e.g. "this month" or "last month"
 
 set -euo pipefail
 
@@ -26,10 +33,43 @@ if ! command -v modal &>/dev/null; then
 fi
 
 VOLUME="nanochat-modal"
-REPORT_REMOTE="run_stats/cpu_train.json"
+LOCAL_RUNS="${NANOCHAT_MODAL_ARCHIVE:-$HOME/.cache/nanochat-modal/runs}"
 
 usage() {
-    sed -n 3,18p "$0" | sed 's/^# \{0,1\}//'
+    sed -n 3,24p "$0" | sed 's/^# \{0,1\}//'
+}
+
+# Print the run ids on the Volume, oldest first. Prints nothing if there are none yet.
+volume_run_ids() {
+    modal volume ls "$VOLUME" runs --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for e in sorted(entries, key=lambda e: e["filename"]):
+    if e.get("type") == "dir":
+        print(e["filename"].rsplit("/", 1)[-1])
+' || true
+}
+
+# Print the id of the newest run: the latest on the Volume, or the latest local folder.
+latest_run() {
+    local ids
+    ids=$(volume_run_ids | tail -n 1)
+    if [ -z "$ids" ] && [ -d "$LOCAL_RUNS" ]; then
+        ids=$(ls -1 "$LOCAL_RUNS" 2>/dev/null | sort | tail -n 1)
+    fi
+    if [ -z "$ids" ]; then
+        echo "No archived runs yet. A CPU run writes one when it starts." >&2
+        return 1
+    fi
+    echo "$ids"
+}
+
+# Fetch one file of a run from the Volume to stdout.
+volume_file() {
+    modal volume get "$VOLUME" "runs/$1/$2" -
 }
 
 # Print "<app-id>\t<state>\t<created_at>" for the current nanochat run. Exit 1 if none.
@@ -66,7 +106,7 @@ resolve_app() {
         return
     fi
     local line
-    line=$(pick_app) || { echo "No nanochat app found. Pass an app id, or run: bash runs/modal_peek.sh past" >&2; exit 1; }
+    line=$(pick_app) || { echo "No nanochat app found. Pass an app id, or run: bash runs/modal_peek.sh apps" >&2; exit 1; }
     local app state created
     IFS=$'\t' read -r app state created <<<"$line"
     echo "Using app $app (state: $state, created $created). Pass an app id to choose another." >&2
@@ -92,8 +132,79 @@ case "$cmd" in
         echo "== Active containers =="
         modal container list
         ;;
-    past)
+    apps)
         modal app list --limit "${1:-10}"
+        ;;
+    past)
+        echo "== Local archive ($LOCAL_RUNS) =="
+        if [ -d "$LOCAL_RUNS" ] && [ -n "$(ls -A "$LOCAL_RUNS" 2>/dev/null)" ]; then
+            for d in $(ls -1 "$LOCAL_RUNS" | sort); do
+                rev=$(head -n 1 "$LOCAL_RUNS/$d/run.log" 2>/dev/null | sed -n 's/.*(code \([^)]*\)).*/\1/p')
+                echo "  $d  code=${rev:-unknown}"
+            done
+        else
+            echo "  (none)"
+        fi
+        echo
+        echo "== On the Volume ($VOLUME/runs) =="
+        ids=$(volume_run_ids)
+        if [ -n "$ids" ]; then
+            echo "$ids" | sed 's/^/  /'
+        else
+            echo "  (none)"
+        fi
+        ;;
+    report)
+        run="${1:-$(latest_run)}"
+        volume_file "$run" report.json || { echo "No report for $run on the Volume." >&2; exit 1; }
+        ;;
+    compare)
+        ids=$(volume_run_ids)
+        if [ -z "$ids" ]; then
+            echo "No runs on the Volume yet." >&2
+            exit 1
+        fi
+        # Build one row per run from its config.json and report.json.
+        for run in $ids; do
+            cfg=$(volume_file "$run" config.json 2>/dev/null || echo "{}")
+            rep=$(volume_file "$run" report.json 2>/dev/null || echo "{}")
+            printf '%s\t%s\t%s\n' "$run" "$cfg" "$rep"
+        done | python3 -c '
+import json, sys
+header = ["run", "code", "cores", "batch", "iters", "wall", "timeout%", "avg cores", "peak GiB", "verdicts"]
+rows = [header]
+def pct(share):
+    return "-" if share is None else f"{share * 100:.0f}%"
+for line in sys.stdin:
+    run, cfg_s, rep_s = line.rstrip("\n").split("\t", 2)
+    cfg, rep = json.loads(cfg_s), json.loads(rep_s)
+    wall = rep.get("wall_s")
+    rows.append([
+        run,
+        cfg.get("code_rev", "?"),
+        str(cfg.get("cores", "?")),
+        str(cfg.get("device_batch_size", "?")),
+        str(cfg.get("num_iterations", "?")),
+        f"{int(wall // 3600)}h{int(wall % 3600 // 60):02d}m" if wall is not None else "running",
+        pct(rep.get("timeout_share")),
+        str(rep.get("avg_cores_busy", "-")),
+        str(rep.get("peak_rss_gib", "-")),
+        "; ".join(rep.get("verdicts", [])) or "-",
+    ])
+widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
+for r in rows:
+    print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+'
+        ;;
+    pull)
+        run="${1:-$(latest_run)}"
+        dest="$LOCAL_RUNS/$run"
+        mkdir -p "$dest"
+        for f in config.json report.json manifest.json; do
+            volume_file "$run" "$f" > "$dest/$f" 2>/dev/null || rm -f "$dest/$f"
+        done
+        echo "Pulled $run into $dest (config, report, manifest). Checkpoints stay on the Volume."
+        ls -1 "$dest"
         ;;
     info)
         app=$(resolve_app "${1:-}")
@@ -127,13 +238,6 @@ case "$cmd" in
         else
             modal container logs "$ctr" | tail -n "$n"
         fi
-        ;;
-    report)
-        # Downloads to stdout; nothing is written locally.
-        modal volume get "$VOLUME" "$REPORT_REMOTE" - || {
-            echo "No run report yet at $VOLUME:$REPORT_REMOTE (it is written when a CPU training run ends)." >&2
-            exit 1
-        }
         ;;
     cost)
         modal billing summary --for "${1:-this month}"
