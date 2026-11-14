@@ -1,8 +1,10 @@
-"""Modal app: nanochat on 8×H100.
+"""Modal app: nanochat on Modal, in one of two modes.
 
-CPU prefetch: dataset -n 170, commit.
-GPU train: speedrun.sh with SKIP_SETUP=1, wait-for-ack hooks, final commit.
-Local: modal volume get tokenizer + chatsft_checkpoints, print chat tip.
+  --mode cpu (default): runs/runcpu.sh on a heavy CPU machine (no GPU, no payment gate).
+  --mode gpu:           runs/speedrun.sh on 8×H100 (needs a GPU payment method).
+
+Both modes: prefetch dataset shards to the Volume, train with wait-for-ack commits,
+then download tokenizer + chat checkpoints to the local machine.
 
 CRITICAL: Do not import nanochat.dataset at module level (binds DATA_DIR at import time).
 Set NANOCHAT_BASE_DIR in environment before any python -m calls.
@@ -16,33 +18,48 @@ import time
 import modal
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Modal app and image definition
+# Modal app, Volume and sizing
 
 app = modal.App(name="nanochat-speedrun")
 
-# Shared Volume: mounted at /data/nanochat-modal
+# Shared Volume: mounted at BASE_DIR (= NANOCHAT_BASE_DIR on Modal)
+BASE_DIR = "/data/nanochat-modal"
 vol = modal.Volume.from_name("nanochat-modal", create_if_missing=True)
 
-# Base image: debian_slim + python 3.11 + uv + deps + code + .venv
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("uv")
-    .add_local_file("pyproject.toml", remote_path="/root/nanochat/pyproject.toml", copy=True)
-    .add_local_file("uv.lock", remote_path="/root/nanochat/uv.lock", copy=True)
-    .run_commands("cd /root/nanochat && uv sync --no-install-project --extra gpu --frozen")
-    .env(
-        {
-            "PATH": "/root/nanochat/.venv/bin:/usr/local/bin:/usr/bin:/bin",
-            "PYTHONPATH": "/root/nanochat",
-        }
+PREFETCH_TIMEOUT = 2 * 60 * 60
+PREFETCH_SHARDS_GPU = 170  # speedrun.sh needs ~170 shards
+PREFETCH_SHARDS_CPU = 8  # runcpu.sh needs 8 shards
+GPU_TRAIN_TIMEOUT = 4 * 60 * 60
+CPU_TRAIN_TIMEOUT = 3 * 60 * 60
+CPU_CORES = 64  # heavy machine: CPU mode is meant to use every core the account allows
+CPU_MEMORY_MIB = 131072  # 128 GiB
+
+
+def _nanochat_image(extra: str) -> modal.Image:
+    """Image with the uv-synced deps for one extra (gpu or cpu). Local source is the last layer."""
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .pip_install("uv")
+        .add_local_file("pyproject.toml", remote_path="/root/nanochat/pyproject.toml", copy=True)
+        .add_local_file("uv.lock", remote_path="/root/nanochat/uv.lock", copy=True)
+        .run_commands(f"cd /root/nanochat && uv sync --no-install-project --extra {extra} --frozen")
+        .env(
+            {
+                "PATH": "/root/nanochat/.venv/bin:/usr/local/bin:/usr/bin:/bin",
+                "PYTHONPATH": "/root/nanochat",
+            }
+        )
+        # Local source is the LAST layer: Modal rejects build steps after add_local_*.
+        .add_local_dir(
+            ".",
+            remote_path="/root/nanochat",
+            ignore=[".venv", ".git", "**/.pytest_cache", "**/__pycache__"],
+        )
     )
-    # Local source is the LAST layer: Modal rejects build steps after add_local_*.
-    .add_local_dir(
-        ".",
-        remote_path="/root/nanochat",
-        ignore=[".venv", ".git", "**/.pytest_cache", "**/__pycache__"],
-    )
-)
+
+
+image = _nanochat_image("gpu")  # GPU mode (speedrun)
+image_cpu = _nanochat_image("cpu")  # CPU mode (runcpu), CPU torch wheels, no CUDA
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Environment helpers
@@ -59,8 +76,13 @@ def _modal_env(base_dir: str) -> dict[str, str]:
     }
 
 
+def _available_cores() -> int:
+    """Cores this container may use (respects cgroup/affinity limits, not the host count)."""
+    return len(os.sched_getaffinity(0))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Wait-for-ack daemon (runs in background during GPU function)
+# Wait-for-ack daemon (runs in background during a training function)
 
 
 def _commit_daemon(volume: modal.Volume, base_dir: str) -> None:
@@ -143,18 +165,16 @@ def _commit_daemon(volume: modal.Volume, base_dir: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prefetch function (CPU only)
+# Shared run helpers (used by both modes)
 
 
-@app.function(timeout=2 * 60 * 60, volumes={"/data/nanochat-modal": vol}, image=image)
-def prefetch() -> None:
-    """CPU prefetch: download ClimbMix shards via dataset -n 170, commit."""
-    base_dir = "/data/nanochat-modal"
-    modal_env = _modal_env(base_dir)
+def _run_prefetch(shards: int) -> None:
+    """Download ClimbMix shards into the Volume (skip-if-exist), then commit."""
+    modal_env = _modal_env(BASE_DIR)
 
-    print("[prefetch] Starting dataset prefetch (170 shards)...")
+    print(f"[prefetch] Starting dataset prefetch ({shards} shards)...")
     result = subprocess.run(
-        ["python3", "-m", "nanochat.dataset", "-n", "170"],
+        ["python3", "-m", "nanochat.dataset", "-n", str(shards)],
         cwd="/root/nanochat",
         env={**os.environ, **modal_env},
         check=False,
@@ -168,39 +188,27 @@ def prefetch() -> None:
     print("[prefetch] Volume committed.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Train function (GPU: 8×H100)
-
-
-@app.function(
-    image=image,
-    gpu="H100:8",
-    timeout=4 * 60 * 60,
-    volumes={"/data/nanochat-modal": vol},
-)
-def train() -> None:
-    """GPU train: speedrun.sh with SKIP_SETUP=1 and wait-for-ack hooks."""
+def _run_training(script: str, extra_env: dict[str, str]) -> None:
+    """Run one stage script with the commit daemon, marker cleanup and final commit."""
     os.chdir("/root/nanochat")
 
     # Set environment: Modal hooks and stage markers go in Volume
-    base_dir = "/data/nanochat-modal"
-    modal_env = _modal_env(base_dir)
+    modal_env = {**_modal_env(BASE_DIR), **extra_env}
     for key, value in modal_env.items():
         os.environ[key] = value
 
     # Start commit daemon in background
     daemon_thread = threading.Thread(
         target=_commit_daemon,
-        args=(vol, base_dir),
+        args=(vol, BASE_DIR),
         daemon=True,
     )
     daemon_thread.start()
     print("[train] Commit daemon started")
 
-    # Run speedrun.sh
-    print("[train] Running speedrun.sh...")
+    print(f"[train] Running {script}...")
     result = subprocess.run(
-        ["bash", "runs/speedrun.sh"],
+        ["bash", script],
         cwd="/root/nanochat",
         env={**os.environ, **modal_env},
         check=False,
@@ -209,33 +217,69 @@ def train() -> None:
     # Clean up hook files BEFORE final commit
     for marker in [".modal_commit_request", ".modal_commit_failed", ".modal_commit_heartbeat"]:
         try:
-            os.remove(os.path.join(base_dir, marker))
+            os.remove(os.path.join(BASE_DIR, marker))
         except FileNotFoundError:
             pass
 
-    # Always commit final state (even if speedrun failed)
-    print(f"[train] Speedrun complete (exit code {result.returncode}); final volume commit...")
+    # Always commit final state (even if the script failed)
+    print(f"[train] {script} finished (exit code {result.returncode}); final volume commit...")
     vol.commit()
 
-    # Re-raise if speedrun failed
     if result.returncode != 0:
-        raise RuntimeError(f"speedrun.sh failed with exit code {result.returncode}")
+        raise RuntimeError(f"{script} failed with exit code {result.returncode}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Local entrypoint: orchestrate prefetch → train → download → tip
+# CPU mode: runcpu.sh on a heavy CPU machine (no GPU)
 
 
-@app.local_entrypoint()
-def main() -> None:
-    print("═" * 80)
-    print("nanochat on Modal: prefetch → train → download")
-    print("═" * 80)
-    print("\n[local] Step 1: CPU prefetch 170 shards...")
-    prefetch.remote()
-    print("[local] Step 2: GPU train 8×H100...")
-    train.remote()
-    print("\n[local] Step 3: Downloading chat artifacts...")
+@app.function(timeout=PREFETCH_TIMEOUT, volumes={BASE_DIR: vol}, image=image_cpu)
+def prefetch_cpu() -> None:
+    """CPU-mode prefetch: 8 shards (what runcpu.sh needs)."""
+    _run_prefetch(PREFETCH_SHARDS_CPU)
+
+
+@app.function(
+    image=image_cpu,
+    cpu=CPU_CORES,
+    memory=CPU_MEMORY_MIB,
+    timeout=CPU_TRAIN_TIMEOUT,
+    volumes={BASE_DIR: vol},
+)
+def train_cpu() -> None:
+    """CPU train: runcpu.sh using every core in this container, same commit protocol."""
+    _run_training("runs/runcpu.sh", {"OMP_NUM_THREADS": str(_available_cores())})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU mode: speedrun.sh on 8×H100
+
+
+@app.function(timeout=PREFETCH_TIMEOUT, volumes={BASE_DIR: vol}, image=image)
+def prefetch() -> None:
+    """GPU-mode prefetch: 170 shards (what speedrun.sh needs)."""
+    _run_prefetch(PREFETCH_SHARDS_GPU)
+
+
+@app.function(
+    image=image,
+    gpu="H100:8",
+    timeout=GPU_TRAIN_TIMEOUT,
+    volumes={BASE_DIR: vol},
+)
+def train() -> None:
+    """GPU train: speedrun.sh with SKIP_SETUP=1 and wait-for-ack hooks."""
+    _run_training("runs/speedrun.sh", {})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local entrypoint: prefetch → train → download → tip
+
+MODES = ("cpu", "gpu")
+
+
+def _download_artifacts() -> None:
+    """Pull tokenizer and chat checkpoints from the Volume into ~/.cache/nanochat-modal."""
     cache_dir = os.path.expanduser("~/.cache/nanochat-modal")
     os.makedirs(cache_dir, exist_ok=True)
     for remote, local in [("/tokenizer", f"{cache_dir}/tokenizer"), ("/chatsft_checkpoints", f"{cache_dir}/chatsft_checkpoints")]:
@@ -249,6 +293,23 @@ def main() -> None:
     if not model_files:
         raise RuntimeError("SFT incomplete: no model checkpoints")
     print(f"[local] Found {len(model_files)} checkpoint(s)\n" + "═" * 80)
+
+
+@app.local_entrypoint()
+def main(mode: str = "cpu") -> None:
+    if mode not in MODES:
+        raise SystemExit(f"Unknown mode {mode!r}: use --mode cpu or --mode gpu")
+    prefetch_fn, train_fn = (prefetch_cpu, train_cpu) if mode == "cpu" else (prefetch, train)
+    label = "CPU (runcpu, heavy machine)" if mode == "cpu" else "GPU (speedrun, 8×H100)"
+    print("═" * 80)
+    print(f"nanochat on Modal, mode={mode}: {label}")
+    print("═" * 80)
+    print("\n[local] Step 1: prefetch...")
+    prefetch_fn.remote()
+    print(f"[local] Step 2: train ({mode})...")
+    train_fn.remote()
+    print("\n[local] Step 3: Downloading chat artifacts...")
+    _download_artifacts()
     print("SUCCESS: training complete and artifacts downloaded.")
     print("═" * 80)
     print("\nTo chat locally, run:")
@@ -257,4 +318,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit("Use: modal run runs/modal_run.py")
+    raise SystemExit("Use: modal run runs/modal_run.py --mode cpu|gpu")
