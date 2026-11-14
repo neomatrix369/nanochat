@@ -11,8 +11,8 @@
 #   bash runs/modal_peek.sh status                 running apps + active containers
 #   bash runs/modal_peek.sh past [N]               last N apps, incl. recently stopped (default 10)
 #   bash runs/modal_peek.sh info [app-id]          lifecycle, functions, state of an app
-#   bash runs/modal_peek.sh logs [app-id] [N]      last N log lines of an app (default 100)
-#   bash runs/modal_peek.sh container [ta-id] [N]  last N log lines of a container
+#   bash runs/modal_peek.sh logs [app-id] [N] [-f]      last N log lines of an app (default 100); -f streams live
+#   bash runs/modal_peek.sh container [ta-id] [N] [-f] last N log lines of a container; -f streams live
 #   bash runs/modal_peek.sh report                 CPU run report saved on the Volume (run_stats)
 #   bash runs/modal_peek.sh cost [PERIOD]          billing summary, e.g. "this month" or "last month"
 
@@ -76,6 +76,14 @@ resolve_app() {
 cmd="${1:-status}"
 shift || true
 
+# -f anywhere in the args means "follow": stream logs live instead of a snapshot.
+follow=0
+rest=()
+for arg in "$@"; do
+    if [ "$arg" = "-f" ]; then follow=1; else rest+=("$arg"); fi
+done
+set -- ${rest[@]+"${rest[@]}"}
+
 case "$cmd" in
     status)
         echo "== Running apps =="
@@ -98,7 +106,11 @@ case "$cmd" in
         else
             app=$(resolve_app ""); n="${1:-100}"
         fi
-        modal app logs "$app" | tail -n "$n"
+        if [ "$follow" = 1 ]; then
+            modal app logs "$app" -f
+        else
+            modal app logs "$app" | tail -n "$n"
+        fi
         ;;
     container)
         # Args: [ta-id] [N]. A leading ta- id picks the container; otherwise the current run's.
@@ -110,7 +122,11 @@ case "$cmd" in
             echo "Using container $ctr." >&2
             n="${1:-100}"
         fi
-        modal container logs "$ctr" | tail -n "$n"
+        if [ "$follow" = 1 ]; then
+            modal container logs "$ctr" -f
+        else
+            modal container logs "$ctr" | tail -n "$n"
+        fi
         ;;
     report)
         # Downloads to stdout; nothing is written locally.
