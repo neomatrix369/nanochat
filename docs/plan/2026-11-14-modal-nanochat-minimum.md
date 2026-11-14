@@ -123,12 +123,42 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 6. Volume-backed idempotent data + stage markers.
 7. Local idempotent features work on Modal.
 8. One command: `bash runs/runmodal.sh`.
-9. Profile → 8×H100; never runcpu/CPU train on Modal.
+9. **User picks the machine on Modal:** `MODE=cpu` (`runcpu` profile on a CPU function, §1a) or `MODE=gpu` (`speedrun` profile on 8×H100, needs a payment method). Both are supported paths; CPU is the default until the GPU entitlement exists.
 10. **Existing script changes work for Modal + local CPU + local GPU** (§0.1).
+
+## 1a. Phase A — whole pipeline on a CPU machine (first)
+
+**Why:** the H100 run is blocked on a payment method. A CPU function runs on the account today (probe: `cpu ok`). Phase A exercises every stage (tokenizer → base train → base eval → SFT → chat) on Modal, so Phase B only changes the machine and the profile.
+
+**Honest expectation:** Phase A trains the small `runcpu` model (depth 6, 5000 steps, 8 data shards). It proves the pipeline end to end. It does not produce a GPT-2-grade model. The repo's own note says base train takes about 30 min on an M3 Max; a Modal CPU box is a guess until measured.
+
+**The setup (recommended):**
+
+| Part | Choice | Why |
+|------|--------|-----|
+| Profile | `runcpu` (`RUNCPU_*` knobs from `nanochat/defaults.py`) | Only profile built for CPU; covers all stages |
+| Machine | Modal function, `cpu=16`, `memory=32768` MiB, no `gpu` | Enough cores for fp32 matmul; cheap to resize. Measure first (below) |
+| Threads | `OMP_NUM_THREADS=16` in the function env | `speedrun.sh` pins it to 1 (GPU path); CPU needs all cores |
+| Image | Second image `image_cpu`: `uv sync --extra cpu --frozen` (Linux uses the PyTorch CPU wheel index, much smaller than CUDA) | Keeps GPU image untouched for Phase B |
+| Data | `prefetch_cpu`: `nanochat.dataset -n 8` (not 170), same Volume | `runcpu` needs 8 shards; shards already on Volume skip-if-exist when Phase B runs |
+| Timeout | 3 h train, 1 h prefetch | Unmeasured; raise if the probe says so |
+
+**Phase A implementation (todos):**
+
+1. `runs/runcpu.sh`: honour `NANOCHAT_BASE_DIR` (today it hard-sets `$HOME/.cache/nanochat`) and `SKIP_SETUP` (today it always runs `uv sync`). Same pattern as `speedrun.sh`. Unset = today's behaviour (§0.1).
+2. `runs/modal_run.py`: add `image_cpu`; add `prefetch_cpu` (8 shards) and `train_cpu` (`runs/runcpu.sh`, `cpu=16`, env `OMP_NUM_THREADS=16`, `SKIP_SETUP=1`, `NANOCHAT_BASE_DIR=/data/nanochat-modal`).
+3. `runs/runmodal.sh`: add `MODE=cpu` (default for now) that runs `prefetch_cpu` then `train_cpu`, prints cost, asks before billable work. `MODE=gpu` keeps the Phase B path.
+4. Tests: pytest for the new `modal_run.py` config (image layer order, cpu/gpu split). No GPU needed.
+5. **Measure before committing:** the first run logs per-step time from `base_train`. Estimate total = step time × 5000. If it is over 3 h, stop and resize (more cores) or lower the profile. Record the real numbers in `PROGRESS.md`.
+
+**Mode switch (user-facing):** `MODE=cpu` or `MODE=gpu` on `runs/runmodal.sh`. The chosen mode sets the profile, the image, the function, and the cost line it prints before asking to proceed. Both modes share the same Volume, stage markers, commit hook, and download/tip step, so a user can switch later and keep finished stages where the profile matches.
+
+**Phase B (GPU, `MODE=gpu`):** `speedrun` on `gpu="H100:8"`, needs the payment method, §0–§10.
 
 ## 2. Non-goals
 
-- Multi-node clusters; vendoring community modal fork; porting `runcpu` to Modal
+- Multi-node clusters; vendoring community modal fork
+- Phase A on GPU; Phase B before a payment method exists
 - New skip system; spot/preemption fancy resume; hyperparam changes
 - **SMOKE / 1×H100 path in MVP** (incompatible with stock `speedrun.sh` 8-way torchrun without extra knobs)
 - Mid-train `--resume-from-step` as required MVP (stage-boundary resume only, same as local)
@@ -142,7 +172,7 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 | Where do data files land? | Volume `…/base_data_climbmix/` (~170 shards / ~17GB); CPU prefetch |
 | Idempotent? | Yes at stage boundaries — `dataset.py` + `_stage_lib.sh` markers; re-run SKIPs finished stages. A kill mid-stage redoes that stage (no mid-train resume, §2). |
 | One command? | `bash runs/runmodal.sh` |
-| Avoid 3h CPU? | Yes — always 8×H100 speedrun; never runcpu on Modal |
+| Can we run without a GPU? | Yes — Phase A (§1a): `runcpu` profile on a 16-core Modal CPU function. Small model, whole pipeline. Phase B (8×H100) waits for the payment method |
 | Do script edits break local CPU/GPU? | **No** — §0.1: Modal opts are env-only; unset = today’s `runcpu` / bare `speedrun` |
 
 ## 4. UX
@@ -211,7 +241,8 @@ Chat minimum: `tokenizer/` + `chatsft_checkpoints/`. If SFT never finished, **do
 | Clock | Policy |
 |-------|--------|
 | Image | Concrete layout below. No ClimbMix/train in image build. |
-| Train | Always `gpu="H100:8"`. Never CPU train. Never size from local Mac. |
+| Train (Phase A) | `runcpu` profile on `cpu=16`, `image_cpu`. No GPU. Sized by measurement, not from the Mac (§1a) |
+| Train (Phase B) | `speedrun` profile on `gpu="H100:8"`, after payment method. Never size from local Mac |
 
 **Image recipe (required — pinned):**
 
@@ -317,6 +348,10 @@ Both Modal functions: identical Volume name/mount, `NANOCHAT_BASE_DIR`, `HF_HOME
 14. **Cache isolation (Goal 3):** after a Modal run, `~/.cache/nanochat` mtime is unchanged.
 15. **Knob isolation (Goal 9):** the GPU job log shows only `SPEEDRUN_*` profile knobs; no `RUNCPU_*` values reach the job.
 16. **Volume path (highest-risk change, `speedrun.sh:21`):** the GPU job log prints `NANOCHAT_BASE_DIR=/data/nanochat-modal` at start. After `base_train`, `/data/nanochat-modal/base_checkpoints/.train_ok` exists in the Volume. A missed fix would show `$HOME/.cache/nanochat` here and produce a silent false-success on re-run.
+17. **Phase A (§1a) run:** `runcpu` completes all stages on Modal CPU; the log shows `NANOCHAT_BASE_DIR=/data/nanochat-modal`, `OMP_NUM_THREADS=16`, and no `nvidia-smi`/CUDA step; `base_checkpoints/.train_ok` and `chatsft_checkpoints` land on the Volume.
+18. **Phase A chat:** `modal volume get` pulls the chat checkpoint; `NANOCHAT_BASE_DIR=~/.cache/nanochat-modal python3 -m scripts.chat_cli -p "What is the capital of France?"` returns a non-empty answer. The answer quality is not a gate for the small model.
+19. **Phase A time gate:** measured total from step 5 of §1a fits the 3 h timeout, recorded in `PROGRESS.md`.
+20. **runcpu env isolation:** with Modal env unset, `bash runs/runcpu.sh` still writes to `~/.cache/nanochat` and still runs `uv sync --extra cpu` (§0.1 invariant for the local CPU path).
 
 ## 10. Cost / ops (docs)
 
