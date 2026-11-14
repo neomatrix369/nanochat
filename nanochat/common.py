@@ -115,6 +115,13 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 
     return file_path
 
+def format_duration(seconds: float) -> str:
+    """Format a duration as 'Hh Mm Ss' for logs, e.g. 3725 -> '1h 2m 5s'."""
+    total = max(0, round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}h {minutes}m {secs}s"
+
 def print0(s="",**kwargs):
     ddp_rank = int(os.environ.get('RANK', 0))
     if ddp_rank == 0:

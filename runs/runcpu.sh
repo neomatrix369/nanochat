@@ -17,17 +17,30 @@
 set -euo pipefail
 
 # all the setup stuff
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 mkdir -p "$NANOCHAT_BASE_DIR"
 PROFILE=runcpu
 source "$(dirname "${BASH_SOURCE[0]}")/_stage_lib.sh"
 # Run knobs come from nanochat/defaults.py (PROFILE_RUNCPU); profiles.sh is its emitted shell form.
 source "$(dirname "${BASH_SOURCE[0]}")/profiles.sh"
+# Modal-only overrides: Modal sets NANOCHAT_RUNCPU_* on its CPU machine. Unset (local Mac/CPU)
+# keeps the profile values above, so local runs are unchanged.
+RUNCPU_DEVICE_BATCH_SIZE="${NANOCHAT_RUNCPU_DEVICE_BATCH_SIZE:-$RUNCPU_DEVICE_BATCH_SIZE}"
+RUNCPU_NUM_ITERATIONS="${NANOCHAT_RUNCPU_NUM_ITERATIONS:-$RUNCPU_NUM_ITERATIONS}"
+RUNCPU_EVAL_DEVICE_BATCH_SIZE="${NANOCHAT_RUNCPU_EVAL_DEVICE_BATCH_SIZE:-$RUNCPU_EVAL_DEVICE_BATCH_SIZE}"
 
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-[ -d ".venv" ] || uv venv
-uv sync --extra cpu
+# Python venv setup: if SKIP_SETUP is set, skip uv/venv/sync (expect .venv to exist, e.g. the Modal image)
+if [ -z "${SKIP_SETUP:-}" ]; then
+    command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+    [ -d ".venv" ] || uv venv
+    uv sync --extra cpu
+fi
 set +u; source .venv/bin/activate; set -u
+# Run record: one folder per run (run.json, milestone events, spans). Modal sets these itself.
+export NANOCHAT_RUN_ID="${NANOCHAT_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-cpu}"
+export NANOCHAT_RUN_cpu="${NANOCHAT_RUN_cpu:-local-cpu}"
+export NANOCHAT_RUN_DIR="${NANOCHAT_RUN_DIR:-$NANOCHAT_BASE_DIR/runs/$NANOCHAT_RUN_ID}"
+python3 -m nanochat.run_record start "$NANOCHAT_RUN_DIR" --mode "$NANOCHAT_RUN_cpu" || echo "WARN: run record not started" >&2
 if [ -z "${WANDB_RUN:-}" ]; then
     WANDB_RUN=dummy
 fi

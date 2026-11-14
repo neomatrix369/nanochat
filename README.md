@@ -95,9 +95,10 @@ Get it to write stories or poems. Ask it to tell you who you are to see a halluc
 |--------|---------|----------|------|------|
 | **Local CPU/MPS** | `bash runs/runcpu.sh` | Mac or CPU machine | ~1 hour | Free |
 | **Local GPU** | `bash runs/speedrun.sh` | 8×H100 bare metal | ~1.5–2 hours | $40–60 (yours) |
-| **Cloud GPU (Modal)** | `bash runs/runmodal.sh` | Modal 8×H100 | ~1.5–2 hours | ~$40–60 (first run higher) |
+| **Cloud CPU (Modal)** | `bash runs/runmodal.sh` (default `MODE=cpu`) | Modal, up to 64 cores / 128 GiB, no GPU | Unmeasured (first run measures it) | Scales with cores; check `modal billing rates` |
+| **Cloud GPU (Modal)** | `MODE=gpu bash runs/runmodal.sh` | Modal 8×H100 | ~1.5–2 hours | ~$40–60 (first run higher) |
 
-The **Cloud GPU** option trains on Modal's H100 cluster without requiring local hardware. Cost and time are similar to bare-metal training, but you pay Modal instead of running your own infrastructure. For details, prerequisites, and how to use the trained model locally afterward, see [docs/MODAL.md](docs/MODAL.md).
+The **Cloud** options train on Modal without requiring local hardware. `MODE=cpu` runs the small `runcpu` profile on a heavy CPU machine, with no GPU payment gate. `MODE=gpu` runs the GPT-2-grade `speedrun` profile on 8×H100 and needs a Modal payment method and an 8×H100 entitlement. For details, prerequisites, and how to use the trained model locally afterward, see [docs/MODAL.md](docs/MODAL.md).
 
 A few more notes:
 

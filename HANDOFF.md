@@ -1,54 +1,51 @@
 # HANDOFF — modal-nanochat-minimum
 
-Repo: `/Users/swami/git-repos/ai-ml-dl-stuff/playgroups/nanochat`
-Plan (SSOT): `docs/plan/2026-11-14-modal-nanochat-minimum.md`
+Branch: `feat/modal-nanochat-minimum` (pushed, head `3c6ba61`)
+Plan (SSOT): `docs/plan/2026-11-14-modal-nanochat-minimum.md` (§1a = CPU phase)
 Tracker: `docs/plan/PROGRESS.md` and `docs/plan/TRAIL.md`
 
-## Where things stand (2026-11-14)
+## Phase goal (current): full pipeline on Modal CPU
 
-- **Code is merged.** PR #14 merged into `master` as merge commit `5225a3d`.
-  Branch commits: `4d60902` (env opt-in shell), `afb79e9` (Modal wrapper), `8a0e51e` (review fixes), `4451811` (gitignore), `03d0c4d` (retry pacing and idle clock).
-- **Reviews:** nWave code, platform and architecture/docs reviewers all APPROVED. `03d0c4d` was made after approval and was NOT re-reviewed. Ask a reviewer to check it.
-- **Local checks pass:** `bash -n` on all `runs/*.sh`, `python3 -m py_compile runs/modal_run.py`, and `uv run python3 -m pytest -q` → 142 passed, 16 skipped.
-- **Not verified (needs a real Modal run):** image build, prefetch, 8×H100 train, `modal volume get --force`, chat tip on the Mac, and whether `modal app stop` ends billing.
-- **Modal account:** signed in to the `neomatrix369` workspace (token verified). Modal CLI installed as a uv tool at `~/.local/bin/modal` (client 1.6.4). The project venv is untouched.
+GPU is blocked: Modal needs a payment method before any H100 function starts. This phase runs the whole `runcpu` pipeline (tokenizer → base train → base eval → SFT → chat) on a heavy CPU machine. GPU comes later.
 
-## Decisions that must hold
+## What is done
 
-- `SKIP_SETUP=1` ALWAYS runs `source .venv/bin/activate`. No PATH fallback. The image must provide `/root/nanochat/.venv`.
-- Use `python3`, never bare `python`, in every command and script.
-- Modal image: `pip_install("uv")`, copy `pyproject.toml` and `uv.lock`, run `uv sync --no-install-project --extra gpu --frozen` into `/root/nanochat/.venv`, then `add_local_dir` as the LAST layer. The SDK's `Image.uv_sync` is NOT used, because it puts the venv at `/.uv/.venv`.
-- Image PATH is a literal string, not `$PATH`.
-- Commit failure: the daemon writes `.modal_commit_failed` and keeps the request file. The hook fails on that marker.
-- Never `--no-verify`. Never commit to `master`. PRs target `neomatrix369/nanochat`.
+- `9eed864` image fix: `.env()` before the local-source layer (Modal rejects build steps after local files).
+- `31974eb` `runs/runcpu.sh` honours `NANOCHAT_BASE_DIR` and `SKIP_SETUP`. Unset = local behaviour.
+- `3c6ba61` Modal CPU mode:
+  - `runs/modal_run.py --mode cpu|gpu` (default cpu). CPU: `prefetch_cpu` (8 shards) + `train_cpu` (`runcpu.sh`, 64 cores, 128 GiB, `OMP_NUM_THREADS` = cores the container gets).
+  - `runs/runmodal.sh` takes `MODE=cpu|gpu`, prints a mode banner, then runs `modal run runs/modal_run.py --mode $MODE`.
+  - `tests/test_runmodal_mode.py` (3 tests, fake `modal` on PATH, no Modal calls).
+- Local checks: 143 passed / 18 skipped. Ruff clean. `bash -n` and `py_compile` clean. `modal run runs/modal_run.py --help` loads and shows `--mode`. `uv export --extra cpu` resolves Linux torch to `2.9.1+cpu`.
+- Plan updated (§1a, goals, FAQ, verification 16–20). Earlier history: `PROGRESS.md` says "MERGED — live run pending".
+
+## Not verified yet (needs one billable run)
+
+- The CPU image builds on Modal (`uv sync --extra cpu --frozen` remote).
+- Real core cap for `cpu=64` and `memory=131072` on this account. Modal may reject it. If so, lower and re-run.
+- Per-step time and total time of `runcpu` on that machine (plan §1a step 5). If total > 3 h, the 3 h timeout kills it.
+- `modal volume get` pulls the chat checkpoint; chat tip gives a non-empty answer.
+- `modal app stop` ends billing (Ctrl-C only stops the local client).
 
 ## Next steps, in order
 
-1. **Get a go-ahead from the user** for the first billable run. Estimated cost: about $40–60, about 1.5–2 h, plus image build. Nothing billable runs without it.
-2. **Confirm the entitlement cheaply first:** `modal profile current` and check the 8×H100 quota in the Modal dashboard. The first real run is the test if the dashboard isn't clear.
-3. **Build the image only** (no GPU, no training) to catch layer errors: run `modal run runs/modal_run.py::prefetch` only after going ahead on prefetch cost (CPU, but still billable). If that's not wanted, stop at a local build check.
-4. **Run the pipeline** with `RUNMODAL_YES=1 bash runs/runmodal.sh` only once the user says go. Watch the logs for:
-   - prefetch elapsed > 300 s and exit 0
-   - `NANOCHAT_BASE_DIR=/data/nanochat-modal` printed at GPU start
-   - `base_checkpoints/.train_ok` written to the Volume after `base_train`
-5. **Verify billing stops:** after Ctrl-C, run `modal app list`, then `modal app stop <app>`. Update `docs/MODAL.md` (Stopping section) with what actually happened.
-6. **Verify the chat tip** on the Mac: `NANOCHAT_BASE_DIR=~/.cache/nanochat-modal python3 -m scripts.chat_cli -p "Why is the sky blue?"` must return a non-empty answer.
-7. **Second run:** confirm `modal volume get --force` refreshes the local chat dir and shards skip.
-8. **Failure check:** kill after a stage, confirm the next run SKIPs finished stages.
-9. **Reviews:** have a reviewer check `03d0c4d`.
-10. **Progress:** after the live run, update `docs/plan/PROGRESS.md` and `TRAIL.md` (slice → PASSED with the real numbers), and delete this HANDOFF file.
+1. **Get explicit go-ahead for a CPU run.** Cost scales with cores; check Modal's current CPU price first. Nothing billable runs without it.
+2. **Run:** `RUNMODAL_YES=1 MODE=cpu bash runs/runmodal.sh` (or drop `RUNMODAL_YES` to confirm interactively). Keep the laptop awake; use screen/tmux.
+3. **Watch the log for:** `NANOCHAT_BASE_DIR=/data/nanochat-modal`, `OMP_NUM_THREADS` set to the core count, per-step timing from `base_train`, and `.train_ok` on the Volume after base train.
+4. **If the machine is rejected or too slow:** lower `CPU_CORES` / `CPU_MEMORY_MIB` / timeout in `runs/modal_run.py`, re-run.
+5. **Check billing stops:** `modal app list`, then `modal app stop <app>` after any early stop. Record the result in `docs/MODAL.md`.
+6. **Chat tip on the Mac:** `NANOCHAT_BASE_DIR=~/.cache/nanochat-modal python3 -m scripts.chat_cli -p "What is the capital of France?"` returns a non-empty answer (quality is not a gate).
+7. **Second run:** `modal volume get --force` refreshes the chat dir; shards and finished stages SKIP.
+8. **Update trackers** with real numbers (`PROGRESS.md`, `TRAIL.md`), then open a PR from this branch. Do not commit to `master`.
+9. **Review:** nWave reviewers have not seen `03d0c4d`, `9eed864`, `31974eb`, `3c6ba61`. Ask for a review.
 
-## Known gaps (not blockers for the first run)
+## Later (GPU phase)
 
-- `pytest` must be run as `uv run python3 -m pytest`. Bare `uv run pytest` fails collection (`No module named nanochat`). This is an existing setup issue.
-- `pytest-cov` is not in the project env. Coverage runs need `uv run --with pytest-cov python3 -m pytest …`.
-- Ruff: `runs/modal_run.py` should now be clean. Re-check after the next edit.
-- The README file-structure table lists only four `runs/` files. Add the Modal ones when next editing README.
-- Quality gates were not captured in the PR (not a `slice/*` branch).
+- Add a payment method at Modal (Settings → Billing) for the `neomatrix369` workspace.
+- Re-run `MODE=gpu bash runs/runmodal.sh` after an explicit go-ahead (~$40–60, ~2 h). Prefetch 170 shards is CPU but still billable.
 
-## Out of scope for the first run
+## Known gaps (not blockers)
 
-- miniseries and scaling_laws on Modal (later)
-- `runcpu.sh` on Modal (never)
-- SMOKE / 1×H100 path (not documented; excluded from MVP)
-- wandb (default dummy)
+- Docs not yet updated for the CPU mode: `docs/MODAL.md`, `README` Modal pointer. The runmodal banner is the source of truth until then.
+- Run pytest as `uv run python3 -m pytest`. Ruff: `uvx ruff check runs/ tests/`.
+- Sourcery suggests `contextlib.suppress` in `modal_run.py` (cosmetic).
