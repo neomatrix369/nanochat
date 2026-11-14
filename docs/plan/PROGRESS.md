@@ -25,6 +25,10 @@ Delivery ledger for `docs/plan/` slices (non-nWave TRAIL adaptation).
 | 2026-11-13 | fix-forward-mac-phase15 | Parallel worktrees `p15-{shell,trend,tests,docs}` then merge to feat branch | Same Phase 2 pattern; independent writers without clobbering tip |
 | 2026-11-13 | fix-mps-skip-inductor | Skip `torch.compile` / Inductor on MPS (model + fused optim steps); stay eager | Inductor has no MPS backend; was crashing val eval at step 0 |
 | 2026-11-14 | fix-mps-skip-inductor | Gate 4 review: step-0-only announce; compile echo in helper; muon/foreach tests; val-bpb progress non-CUDA only | Reviewers: code-reviewer APPROVE notes; critic+architect CHANGES_REQUESTED (echo firehose, under-tested Muon) |
+| 2026-11-14 | modal-nanochat-minimum | SKIP_SETUP always activates `.venv` (no PATH fallback); image must provide `/root/nanochat/.venv` | User decision; fails loudly instead of silently using another Python |
+| 2026-11-14 | modal-nanochat-minimum | Modal image uses explicit `uv sync` into `/root/nanochat/.venv`, not `Image.uv_sync` | SDK `uv_sync` puts the venv at `/.uv/.venv` (`_image.py:1981`), which speedrun.sh would not activate |
+| 2026-11-14 | modal-nanochat-minimum | Commit failure writes `.modal_commit_failed` and keeps the request file; hook fails fast on it | Review blocker: a failed commit was being acked as success |
+| 2026-11-14 | modal-nanochat-minimum | Post-approval follow-ups (retry pacing, idle clock from hook start) merged without re-review | Small, verified locally; flagged so the next reviewer checks `03d0c4d` |
 | 2026-11-14 | fix-mps-skip-inductor | Grow RoPE cos/sin on demand (2× buffer) when eval prompts exceed `sequence_len * 10` | CORE few-shot assert `2596 > 2560` at short `max_seq_len=256`; static 10× cache is not enough |
 | 2026-11-14 | fix-mps-skip-inductor | Require `.train_ok` for train SKIP; hard-fail `speedrun.sh` without CUDA | Partial `model_*.pt` must not skip train; Mac educational path is `runcpu` only |
 | 2026-11-14 | backlog | Softcap / logits memory parked (gather-at-needed-pos vs `PROFILE_RUNCPU` knobs) | Playgroup softcap/eval discussion; no design pick yet — auto-fit remains the Mac OOM mitigator |
@@ -37,12 +41,13 @@ Delivery ledger for `docs/plan/` slices (non-nWave TRAIL adaptation).
 | fix-forward-mac-phase2 | PASSED (merged) | [PR #6](https://github.com/neomatrix369/nanochat/pull/6) merged 2026-11-13 (`f8d7174` on master); Gate 4 APPROVED (software-craft, acceptance, solution-architect); ddd N/A; pytest defaults+memory 58p / suite 109p/18s |
 | fix-forward-mac-phase15 | PASSED (merged) | [PR #8](https://github.com/neomatrix369/nanochat/pull/8) merged 2026-11-13 (`3054e4a` on master); Gate 4 APPROVED (code-reviewer, critic, architect); pre-push 126p/18s; phase15 unit 17p; ddd N/A |
 | fix-mps-skip-inductor | PASSED (merged) | [PR #10](https://github.com/neomatrix369/nanochat/pull/10) merged 2026-11-14 (`f6ef779` on master); skip Inductor on MPS + MPS AdamW/Muon; progress flush; `.train_ok` + speedrun CUDA hard-fail; RoPE grow-on-demand (`22d1282`); Gate 4 polish |
-| modal-nanochat-minimum | IN-PROGRESS | Branch `feat/modal-nanochat-minimum`; plan [2026-11-14-modal-nanochat-minimum.md](2026-11-14-modal-nanochat-minimum.md). Streams: triple-mode shell (speedrun/_stage_lib/miniseries), Modal wrapper (runmodal.sh, modal_run.py, modal_hook.sh), docs, verify. Modal cloud path cannot be run from this machine (no account / billable). |
+| modal-nanochat-minimum | MERGED — live run pending | [PR #14](https://github.com/neomatrix369/nanochat/pull/14) merged 2026-11-14 (merge `5225a3d` on master; branch commits `4d60902`…`03d0c4d`). Local verification done: 142 passed / 16 skipped; bash -n and py_compile clean; nWave code, platform and architecture/docs reviewers APPROVED (last commit `03d0c4d` applied their follow-ups after approval, not re-reviewed). **Not verified:** Modal image build, prefetch, 8×H100 train, volume get, `modal app stop` billing stop. Next: see [HANDOFF.md](../../HANDOFF.md). |
 
 ## Recent merges (Mac fix-forward track)
 
 | When (UTC) | PR | What landed |
 |------------|----|-------------|
+| 2026-11-14 12:00 | [#14](https://github.com/neomatrix369/nanochat/pull/14) | Modal wrapper (runmodal.sh, modal_run.py, modal_hook.sh); env opt-in for NANOCHAT_BASE_DIR / SKIP_SETUP / post-stage hook; always-activate `.venv`; python3 everywhere; docs/MODAL.md; review fixes |
 | 2026-11-14 | [#10](https://github.com/neomatrix369/nanochat/pull/10) | MPS skip Inductor/compile; MPS optim paths; `.train_ok`; speedrun CUDA hard-fail; RoPE grow-on-demand |
 | 2026-11-13 16:46 | [#8](https://github.com/neomatrix369/nanochat/pull/8) | Phase 1.5: knob diff, packed health, trend crumb, tip |
 | 2026-11-13 16:02 | [#6](https://github.com/neomatrix369/nanochat/pull/6) | Phase 2: defaults SSOT, MPS auto-fit, profiles, RUNNING/README |
