@@ -303,6 +303,35 @@ Recorded so the plan matches what happened. Status is as of commit `8c28ee9`.
 
 **Done when:** a local run and a Modal run each produce `run.json` and `events.jsonl` with one span per stage; `compare` lists both with device, code rev, duration, tok/s, val bpb and CORE; and a run folder stays under about 100 lines.
 
+## 1g. Phase A close-out: carry-over items (PR #18 closes here)
+
+**Why:** PR #18 delivers the CPU pipeline code and the run record. The items below need a live Modal run, a Mac check, human review, or a decision. Moving them into one list lets the PR close with a clear hand-off. Nothing here blocks the code merge except where marked **Gate**.
+
+**Gate for merge to `master`:** the user says so, and checks pass on the exact head commit. Items marked **Gate** must be done first.
+
+| # | Item | Evidence that closes it | Gate | Source |
+|---|------|-------------------------|------|--------|
+| C1 | Full 5000-step CPU run on Modal completes all stages | Run `20261114-125440-cpu` (or a new run) ends with `ok`; `.train_ok` and `chatsft_checkpoints` on the Volume | **Gate** | §1a step 5, §9 #17 |
+| C2 | Step time and total time recorded against the 3 h / 12 h limit | Numbers in `PROGRESS.md` from the finished run | **Gate** | §1a step 5, §9 #19 |
+| C3 | Run record verified on a real run | `run.json`, `events.jsonl`, `compare`, and `pull` output checked; folder under ~100 lines | **Gate** | §1f Done when, §1f #6 |
+| C4 | Resource numbers confirmed (128 GiB memory, 64 cores) | `report` fields in `run.json` | **Gate** | §1d #17 |
+| C5 | Chat answer from the Modal checkpoint on the Mac | `chat_cli` returns a non-empty answer | **Gate** | §1d #20, §9 #18 |
+| C6 | `modal app stop` ends billing | `modal billing summary` after a stop | **Gate** | §1d #19 |
+| C7 | Cost rate checked and recorded | `modal billing rates` output; `est_cost_usd` on the run record | | §1d #7, §1f #3 |
+| C8 | Docs updated for CPU mode | `README.md` Modal pointer and `docs/MODAL.md` cover CPU mode, cost, chat tip | **Gate** | §8.3, §9 #13 |
+| C9 | Review of commits added since PR #14 | Reviewer has seen head commit `b3aff6c` (or later) | **Gate** | §1d #21, §1e #10 |
+| C10 | Lint: fix I001 in `nanochat/common.py`; separate cleanup of 12 old test-file findings | `ruff check` clean on touched files | | PR #18 quality gates, §1d #25 |
+| C11 | Pin the test environment; add `pytest-cov` and `ruff` as dev extras | Test count is stable across two runs; tools present without `--with` | | §1d #11, #12 |
+| C12 | Killed or timed-out runs still leave a report | A run killed at the cap has `status: killed` and a report | | §1d #15 |
+| C13 | Stale leftover apps and the old run's archive reconciled | `modal app list` shows no zero-task leftovers; archive labelled | | §1d #9 |
+| C14 | Check Modal behaviour claims against Modal docs | Each claim in `docs/MODAL.md` cites docs or an observed run | | §1d #24 |
+| C15 | Close duplicate PRs and HANDOFF duplicates | PR #15 closed; one `HANDOFF.md` on the active branch | | §1e #14, #15 |
+| C16 | Stale local branches reviewed and deleted: `backup/modal-pre-rebase`, and the duplicate `docs/modal-plan-session-review` (eed8a6d) | `git branch` shows only branches still in use | | Session branch state |
+| C17 | GPU run record and archive parity (speedrun on Modal) | Same `run.json` and archive as CPU; needs payment method | | §1d #18, §1f #2 — **GPU phase** |
+| C18 | `miniseries.sh` and `scaling_laws.sh` on Modal | Honour `NANOCHAT_BASE_DIR`; run from the same image | | §0 — **later** |
+
+**Done when:** every **Gate** row has evidence, the rest are either closed or moved to a named follow-up issue, and PR #18 is merged or closed by you.
+
 ## 2. Non-goals
 
 - Multi-node clusters; vendoring community modal fork
