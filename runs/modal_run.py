@@ -30,16 +30,17 @@ image = (
     .add_local_file("pyproject.toml", remote_path="/root/nanochat/pyproject.toml", copy=True)
     .add_local_file("uv.lock", remote_path="/root/nanochat/uv.lock", copy=True)
     .run_commands("cd /root/nanochat && uv sync --no-install-project --extra gpu --frozen")
-    .add_local_dir(
-        ".",
-        remote_path="/root/nanochat",
-        ignore=[".venv", ".git", "**/.pytest_cache", "**/__pycache__"],
-    )
     .env(
         {
             "PATH": "/root/nanochat/.venv/bin:/usr/local/bin:/usr/bin:/bin",
             "PYTHONPATH": "/root/nanochat",
         }
+    )
+    # Local source is the LAST layer: Modal rejects build steps after add_local_*.
+    .add_local_dir(
+        ".",
+        remote_path="/root/nanochat",
+        ignore=[".venv", ".git", "**/.pytest_cache", "**/__pycache__"],
     )
 )
 
