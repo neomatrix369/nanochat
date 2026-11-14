@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Any
 
 import modal
 
@@ -99,9 +100,18 @@ def _modal_env(base_dir: str) -> dict[str, str]:
     }
 
 
+def _record(run_id: str, **fields: Any) -> None:
+    """Merge config or resources into the run's run.json. The container has nanochat on PYTHONPATH."""
+    from nanochat.run_record import update_run
+
+    update_run(_run_dir(run_id), **fields)
+
+
 def _available_cores() -> int:
     """Cores this container may use (respects cgroup/affinity limits, not the host count)."""
-    return len(os.sched_getaffinity(0))
+    from nanochat.run_record import host_info
+
+    return host_info()["cores"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,7 +222,7 @@ def _run_prefetch(shards: int) -> None:
 
 
 def _run_record_env(run_id: str, mode: str, code_rev: str) -> dict[str, str]:
-    """Env that points a run's record at its Volume folder (run.json, events.jsonl, summary.json)."""
+    """Env that points a run's record at its Volume folder (run.json and events.jsonl)."""
     return {
         "NANOCHAT_RUN_ID": run_id,
         "NANOCHAT_RUN_MODE": mode,
@@ -272,29 +282,8 @@ def _read_memory_limit() -> int | None:
 
 
 def _run_dir(run_id: str) -> str:
-    """Volume folder for one run: config.json + report.json, kept for later comparison."""
+    """Volume folder for one run: run.json (record), manifest.json and artifacts/."""
     return os.path.join(BASE_DIR, "runs", run_id)
-
-
-def _write_config(run_id: str, mode: str, code_rev: str, cores: int) -> None:
-    """Record the exact settings a run used, before it starts, so failed runs are still described."""
-    config = {
-        "run_id": run_id,
-        "mode": mode,
-        "code_rev": code_rev,
-        "profile": "runcpu",
-        "cores": cores,
-        "memory_gib": CPU_MEMORY_MIB / 1024,
-        "device_batch_size": CPU_DEVICE_BATCH_SIZE,
-        "eval_device_batch_size": CPU_EVAL_DEVICE_BATCH_SIZE,
-        "num_iterations": CPU_NUM_ITERATIONS,
-        "timeout_s": CPU_TRAIN_TIMEOUT,
-    }
-    out_dir = _run_dir(run_id)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-    vol.commit()
 
 
 # Everything a run leaves on the Volume that the next run would overwrite.
@@ -314,11 +303,6 @@ def _archive_artifacts(run_id: str) -> None:
 
     Without this, the next run overwrites checkpoints, metrics and stage markers on the Volume.
     """
-    # Summary for every run, including ones that ended early (the trainer never called finish).
-    subprocess.run(
-        [sys.executable, "-m", "nanochat.run_record", "summary", _run_dir(run_id)],
-        cwd="/root/nanochat", capture_output=True, check=False,
-    )
     artifacts_dir = os.path.join(_run_dir(run_id), "artifacts")
     os.makedirs(artifacts_dir, exist_ok=True)
     manifest = []
@@ -359,10 +343,7 @@ def _report_run(started: float, cores: int, timeout_s: int, run_id: str) -> None
     report["cores_configured"] = CPU_CORES
     report["memory_configured_gib"] = CPU_MEMORY_MIB / 1024
     print("[report] " + json.dumps(report, indent=2))
-    out_dir = _run_dir(run_id)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "report.json"), "w") as f:
-        json.dump(report, f, indent=2)
+    _record(run_id, resources=report)
     vol.commit()
 
 
@@ -386,7 +367,7 @@ def prefetch_cpu() -> None:
 def train_cpu(run_id: str, code_rev: str) -> None:
     """CPU train: runcpu.sh using every core in this container, same commit protocol."""
     cores = _available_cores()
-    _write_config(run_id, "cpu", code_rev, cores)
+    _record(run_id, config={"cores": cores, "memory_gib": CPU_MEMORY_MIB / 1024, "timeout_s": CPU_TRAIN_TIMEOUT})
     started = time.time()
     try:
         _run_training(
@@ -455,7 +436,8 @@ def main(mode: str = "cpu", run_id: str = "", code_rev: str = "unknown") -> None
         raise SystemExit(f"Unknown mode {mode!r}: use --mode cpu or --mode gpu")
     if mode != MODAL_MODE:
         raise SystemExit(f"--mode {mode} needs NANOCHAT_MODAL_MODE={mode}; use runs/runmodal.sh")
-    run_id = run_id or time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + f"-{mode}"
+    if not run_id:
+        raise SystemExit("Pass --run-id (runs/runmodal.sh sets it, along with the archive folder).")
     print(f"[local] run id: {run_id} (code {code_rev})")
     prefetch_fn = prefetch_cpu if mode == "cpu" else prefetch
     if mode == "cpu":

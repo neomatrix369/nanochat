@@ -10,11 +10,9 @@ STAGE_ELAPSED_DIR="$NANOCHAT_BASE_DIR/.stage_elapsed"
 SAVED_TOTAL=0
 
 # Run record: one span line per stage/hook in $NANOCHAT_RUN_DIR/events.jsonl. No-op when unset.
-record_span() {  # name status dur_s start_epoch
+record_span() {  # stage status dur_s hook_s start_epoch  (one span per stage; the module writes it)
     [ -n "${NANOCHAT_RUN_DIR:-}" ] || return 0
-    mkdir -p "$NANOCHAT_RUN_DIR"
-    printf '{"type":"span","name":"%s","status":"%s","dur_s":%s,"start":%s,"t":%s}\n' \
-        "$1" "$2" "$3" "$4" "$(date +%s)" >> "$NANOCHAT_RUN_DIR/events.jsonl"
+    python3 -m nanochat.run_record span "$NANOCHAT_RUN_DIR" "$@" || echo "WARN: run span not recorded" >&2
 }
 
 log() {
@@ -244,9 +242,9 @@ run_stage() {
     t0_epoch=$(date +%s)
     "$@" || rc=$?
     elapsed=$((SECONDS - t0))
-    record_span "stage:$stage" "$([ "$rc" -eq 0 ] && echo ok || echo fail)" "$elapsed" "$t0_epoch"
 
     if [ "$rc" -ne 0 ]; then
+        record_span "$stage" fail "$elapsed" 0 "$t0_epoch"
         log "FAIL stage=$stage elapsed=$(fmt_dur "$elapsed") hint=exit code $rc; fix and re-run the same command (finished stages skip)"
         echo "  root_stage=$stage · cascade_suppressed=yes (later stages not run) · try: see docs/RUNNING.md"
         exit "$rc"
@@ -263,14 +261,15 @@ run_stage() {
 
     log "DONE stage=$stage elapsed=$(fmt_dur "$elapsed") cumulative=$(fmt_dur "$SECONDS")"
 
-    # Run post-stage hook if set (e.g., Modal commit coordination)
+    # Run post-stage hook if set (e.g., Modal commit coordination). Its time goes on the stage span.
+    local hook_s=0
     if [ -n "${NANOCHAT_POST_STAGE_HOOK:-}" ]; then
-        local hook_t0 hook_start
-        hook_t0=$SECONDS; hook_start=$(date +%s)
+        local hook_t0=$SECONDS
         if eval "$NANOCHAT_POST_STAGE_HOOK"; then
-            record_span "hook:$stage" ok "$((SECONDS - hook_t0))" "$hook_start"
+            hook_s=$((SECONDS - hook_t0))
         else
-            record_span "hook:$stage" fail "$((SECONDS - hook_t0))" "$hook_start"
+            hook_s=$((SECONDS - hook_t0))
+            record_span "$stage" hook_fail "$elapsed" "$hook_s" "$t0_epoch"
             log "FAIL stage=$stage reason=NANOCHAT_POST_STAGE_HOOK failed"
             # Delete marker for pure marker stages; for tok_train, don't delete the real artifact
             case "$stage" in
@@ -289,6 +288,8 @@ run_stage() {
             esac
         fi
     fi
+
+    record_span "$stage" ok "$elapsed" "$hook_s" "$t0_epoch"
 
     # Single enrichment line (next + optional wrote: + mem snapshot).
     case "$stage" in

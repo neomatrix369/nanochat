@@ -15,8 +15,8 @@
 #   bash runs/modal_peek.sh status                    running apps + active containers
 #   bash runs/modal_peek.sh apps [N]                  last N Modal apps, incl. stopped (default 10)
 #   bash runs/modal_peek.sh past                      archived runs: local folders and Volume runs
-#   bash runs/modal_peek.sh report [run-id]           resource report of a run (default: latest)
-#   bash runs/modal_peek.sh compare                   one table of every run on the Volume (from summary.json)
+#   bash runs/modal_peek.sh report [run-id]           run record of a run: config, resources, status (default: latest)
+#   bash runs/modal_peek.sh compare                   one table of every run on the Volume
 #   bash runs/modal_peek.sh pull [run-id]             copy a run's config, report, manifest locally
 #   bash runs/modal_peek.sh info [app-id]             lifecycle, functions, state of an app
 #   bash runs/modal_peek.sh logs [app-id] [N] [-f]    last N log lines of an app (default 100); -f streams
@@ -156,7 +156,7 @@ case "$cmd" in
         ;;
     report)
         run="${1:-$(latest_run)}"
-        volume_file "$run" report.json || { echo "No report for $run on the Volume." >&2; exit 1; }
+        volume_file "$run" run.json || { echo "No run record for $run on the Volume." >&2; exit 1; }
         ;;
     compare)
         ids=$(volume_run_ids)
@@ -164,13 +164,13 @@ case "$cmd" in
             echo "No runs on the Volume yet." >&2
             exit 1
         fi
-        # Copy each run's run.json + summary.json into a temp root, then use the one recorder
+        # Copy each run's run.json + events.jsonl into a temp root, then use the one recorder
         # table (nanochat/run_record.py) so local and Modal runs read the same way.
         tmp_root=$(mktemp -d)
         trap 'rm -rf "$tmp_root"' EXIT
         for run in $ids; do
             mkdir -p "$tmp_root/$run"
-            for f in run.json summary.json; do
+            for f in run.json events.jsonl; do
                 volume_file "$run" "$f" > "$tmp_root/$run/$f" 2>/dev/null || rm -f "$tmp_root/$run/$f"
             done
         done
@@ -180,10 +180,10 @@ case "$cmd" in
         run="${1:-$(latest_run)}"
         dest="$LOCAL_RUNS/$run"
         mkdir -p "$dest"
-        for f in run.json summary.json events.jsonl config.json report.json manifest.json; do
+        for f in run.json events.jsonl manifest.json; do
             volume_file "$run" "$f" > "$dest/$f" 2>/dev/null || rm -f "$dest/$f"
         done
-        echo "Pulled $run into $dest (run record, summary, events, config, report, manifest). Checkpoints stay on the Volume."
+        echo "Pulled $run into $dest (run record, events, manifest). Checkpoints stay on the Volume."
         ls -1 "$dest"
         ;;
     info)

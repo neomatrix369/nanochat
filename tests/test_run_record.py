@@ -1,7 +1,7 @@
 """
 Author: nanochat run-record slice (Claude)
 Created: 2026-11-14
-Scope: nanochat/run_record.py. Run folders for local and Modal runs: recording, summary, compare.
+Scope: nanochat/run_record.py. run.json and events.jsonl for local and Modal runs; summaries on demand.
 """
 
 import json
@@ -12,30 +12,28 @@ import pytest
 from nanochat.run_record import (
     EVENTS_JSONL,
     RUN_JSON,
-    SUMMARY_JSON,
     RunRecorder,
-    append_event,
     compare_table,
     find_run_dirs,
+    is_milestone,
     make_run_logger,
     percentile,
     read_events,
+    record_span,
     summarize,
+    update_run,
 )
 
 
-def _span(name: str, dur: float, status: str = "ok") -> dict:
-    return {"type": "span", "name": name, "dur_s": dur, "status": status, "t": 0}
-
-
-def _metric(t: float, **data) -> dict:
-    return {"type": "metric", "t": t, "data": data}
+def _run_json(run_dir: Path, **fields) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / RUN_JSON).write_text(json.dumps({"run_id": run_dir.name, "mode": "local-cpu", **fields}))
 
 
 def test_percentile_uses_nearest_rank_and_handles_empty() -> None:
     """
     Scenario: p50 and p95 of step times; empty input gives None.
-    Slice: latency percentiles in summaries.
+    Slice: latency percentiles.
     """
     # ### Given / ### When / ### Then
     assert percentile([1, 2, 3, 4], 50) == 2
@@ -43,102 +41,42 @@ def test_percentile_uses_nearest_rank_and_handles_empty() -> None:
     assert percentile([], 50) is None
 
 
-def test_summarize_reads_spans_metrics_and_quality(tmp_path: Path) -> None:
+def test_milestones_are_every_500_steps_and_every_evaluation() -> None:
     """
-    Scenario: a finished run with two stages, a hook wait, metrics and a validation score.
-    Slice: summary carries durations, latency, throughput and quality.
+    Scenario: a step on a 500 boundary, a plain step, and a CORE evaluation off the boundary.
+    Slice: only important points are written.
     """
-    # ### Given
-    run_dir = tmp_path / "20261114-000000-local-cpu"
-    run_dir.mkdir()
-    (run_dir / RUN_JSON).write_text(json.dumps({
-        "run_id": "20261114-000000-local-cpu", "mode": "local-cpu", "status": "ok",
-        "started_at": 1000.0, "ended_at": 4600.0, "code_rev": "abc1234", "code_dirty": False,
-        "config": {"device_type": "mps"},
-    }))
-    append_event(str(run_dir), _span("stage:base_train", 3000.0))
-    append_event(str(run_dir), _span("hook:base_train", 2.5))
-    append_event(str(run_dir), _metric(1010.0, step=100, **{"train/dt": 1.0, "train/tok_per_sec": 9000}))
-    append_event(str(run_dir), _metric(1020.0, step=200, **{"train/dt": 3.0, "train/tok_per_sec": 8000, "val/bpb": 1.2}))
-    append_event(str(run_dir), _metric(1030.0, step=300, **{"val/bpb": 1.1, "core_metric": 0.05}))
-
-    # ### When
-    summary = summarize(str(run_dir))
-
-    # ### Then
-    assert summary["status"] == "ok"
-    assert summary["device"] == "mps"
-    assert summary["wall_s"] == 3600.0
-    assert summary["first_metric_latency_s"] == 10.0
-    assert summary["stages_s"] == {"base_train": 3000.0}
-    assert summary["hook_wait_s"] == 2.5
-    assert summary["steps_done"] == 300
-    assert summary["step_time_s_p50"] == 1.0
-    assert summary["step_time_s_p95"] == 3.0
-    assert summary["tok_per_sec_last"] == 8000
-    assert summary["val_bpb_min"] == 1.1
-    assert summary["val_bpb_last"] == 1.1
-    assert summary["core_metric_last"] == 0.05
+    # ### Given / ### When / ### Then
+    assert is_milestone({"step": 500, "train/loss": 1.0})
+    assert not is_milestone({"step": 510, "train/loss": 1.0})
+    assert is_milestone({"step": 530, "core_metric": 0.1})
 
 
-def test_read_events_skips_a_partly_written_last_line(tmp_path: Path) -> None:
+def test_recorder_keeps_only_milestones_and_marks_finished(tmp_path: Path) -> None:
     """
-    Scenario: a run was killed mid-write, leaving a truncated JSON line.
-    Slice: summaries of killed runs still work.
-    """
-    # ### Given
-    append_event(str(tmp_path), _metric(1.0, step=1))
-    (tmp_path / EVENTS_JSONL).open("a").write('{"type": "metric", "t": 2')
-
-    # ### When
-    events = read_events(str(tmp_path))
-
-    # ### Then
-    assert len(events) == 1
-    assert events[0]["data"]["step"] == 1
-
-
-def test_running_run_without_end_is_reported_as_running(tmp_path: Path) -> None:
-    """
-    Scenario: run.json says running and there is no end time (still going, or killed).
-    Slice: status is never reported as ok for a run that has not finished.
-    """
-    # ### Given
-    (tmp_path / RUN_JSON).write_text(json.dumps({"status": "running", "started_at": 0.0}))
-
-    # ### When
-    summary = summarize(str(tmp_path), now=60.0)
-
-    # ### Then
-    assert summary["status"] == "running"
-    assert summary["wall_s"] == 60.0
-
-
-def test_recorder_writes_run_json_events_and_summary(tmp_path: Path) -> None:
-    """
-    Scenario: a trainer logs through the recorder, then finishes it.
-    Slice: the trainer's wandb-shaped calls land in events.jsonl and summary.json.
+    Scenario: the trainer logs every 10 steps, then finishes.
+    Slice: small folder, and a finished run is marked ok with an end time.
     """
     # ### Given
     recorder = RunRecorder(str(tmp_path), config={"depth": 6})
 
     # ### When
-    recorder.log({"step": 500, "train/dt": 0.5, "train/tok_per_sec": 1234})
+    for step in range(10, 1001, 10):
+        recorder.log({"step": step, "train/loss": 1.0})
     recorder.finish()
 
     # ### Then
+    assert [e["data"]["step"] for e in read_events(str(tmp_path))] == [500, 1000]
     run = json.loads((tmp_path / RUN_JSON).read_text())
     assert run["status"] == "ok"
     assert run["config"]["depth"] == 6
-    assert "code_rev" in run
-    summary = json.loads((tmp_path / SUMMARY_JSON).read_text())
-    assert summary["steps_done"] == 500
+    assert "ended_at" in run
 
 
 def test_make_run_logger_is_unchanged_without_a_run_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    Scenario: NANOCHAT_RUN_DIR is unset, as in an existing run. The backend is returned as-is.
-    Slice: recording adds nothing when it is not asked for.
+    Scenario: NANOCHAT_RUN_DIR is unset. The backend is returned as-is.
+    Slice: nothing new is written unless asked for.
     """
     # ### Given
     monkeypatch.delenv("NANOCHAT_RUN_DIR", raising=False)
@@ -174,42 +112,114 @@ def test_make_run_logger_tees_to_recorder_and_backend(tmp_path: Path, monkeypatc
     assert read_events(str(tmp_path))[0]["data"] == {"step": 500}
 
 
+def test_record_span_writes_one_stage_span_with_hook_time(tmp_path: Path) -> None:
+    """
+    Scenario: one stage ran for 90 s and its hook took 4 s.
+    Slice: one span per stage, with the hook time on it (no separate hook span).
+    """
+    # ### Given / ### When
+    record_span(str(tmp_path), "base_train", "ok", 90, 4, 1000)
+
+    # ### Then
+    (event,) = read_events(str(tmp_path))
+    assert event["name"] == "stage:base_train"
+    assert event["dur_s"] == 90
+    assert event["hook_s"] == 4
+
+
+def test_summarize_derives_durations_throughput_and_quality(tmp_path: Path) -> None:
+    """
+    Scenario: a finished run with two stages, metrics and a validation score.
+    Slice: summary is computed from run.json and events.jsonl, not stored.
+    """
+    # ### Given
+    _run_json(tmp_path, started_at=1000.0, ended_at=4600.0, status="ok", code_rev="abc1234",
+              code_dirty=False, config={"device_type": "mps"})
+    record_span(str(tmp_path), "tok_train", "ok", 60, 0, 1000)
+    record_span(str(tmp_path), "base_train", "ok", 3000, 2, 1060)
+    for step, dt, tok, val in [(500, 1.0, 9000, 1.2), (1000, 3.0, 8000, 1.1)]:
+        append_metric = {"type": "metric", "t": 1.0, "data": {
+            "step": step, "train/dt": dt, "train/tok_per_sec": tok, "val/bpb": val}}
+        with (tmp_path / EVENTS_JSONL).open("a") as f:
+            f.write(json.dumps(append_metric) + "\n")
+
+    # ### When
+    s = summarize(str(tmp_path))
+
+    # ### Then
+    assert s["status"] == "ok"
+    assert s["device"] == "mps"
+    assert s["wall_s"] == 3600.0
+    assert s["stages_s"] == {"tok_train": 60, "base_train": 3000}
+    assert s["hook_s"] == 2
+    assert s["steps_done"] == 1000
+    assert s["step_time_s_p50"] == 1.0
+    assert s["step_time_s_p95"] == 3.0
+    assert s["tok_per_sec_last"] == 8000
+    assert s["val_bpb_min"] == 1.1
+
+
+def test_running_or_killed_run_is_never_reported_ok(tmp_path: Path) -> None:
+    """
+    Scenario: run.json says running and there is no end time (still going, or killed).
+    Slice: a run that did not finish is not reported as ok.
+    """
+    # ### Given
+    _run_json(tmp_path, status="running", started_at=0.0)
+
+    # ### When
+    s = summarize(str(tmp_path), now=60.0)
+
+    # ### Then
+    assert s["status"] == "running"
+    assert s["wall_s"] == 60.0
+
+
+def test_read_events_skips_a_partly_written_last_line(tmp_path: Path) -> None:
+    """
+    Scenario: a run was killed mid-write, leaving a truncated JSON line.
+    Slice: summaries of killed runs still work.
+    """
+    # ### Given
+    record_span(str(tmp_path), "tok_train", "ok", 1, 0, 0)
+    (tmp_path / EVENTS_JSONL).open("a").write('{"type": "metric", "t": 2')
+
+    # ### When / ### Then
+    assert len(read_events(str(tmp_path))) == 1
+
+
+def test_update_run_merges_config_and_resources(tmp_path: Path) -> None:
+    """
+    Scenario: launcher settings are merged first, then the resource report; neither erases the other.
+    Slice: run.json is the single place for config and resources.
+    """
+    # ### Given
+    _run_json(tmp_path, config={"device_type": "cpu"})
+
+    # ### When
+    update_run(str(tmp_path), config={"cores": 64}, resources={"peak_rss_gib": 3.2})
+
+    # ### Then
+    run = json.loads((tmp_path / RUN_JSON).read_text())
+    assert run["config"] == {"device_type": "cpu", "cores": 64}
+    assert run["resources"] == {"peak_rss_gib": 3.2}
+
+
 def test_compare_table_lists_each_run_with_key_columns(tmp_path: Path) -> None:
     """
-    Scenario: two runs under one root; the table has one row per run and the dirty flag.
-    Slice: compare shows latency, quality and config at a glance.
+    Scenario: two runs under one root; the table has one row per run and marks uncommitted code.
+    Slice: compare shows the important numbers at a glance.
     """
     # ### Given
     for name, dirty in [("20261114-010000-local-cpu", False), ("20261114-020000-modal-cpu", True)]:
-        d = tmp_path / name
-        d.mkdir()
-        (d / RUN_JSON).write_text(json.dumps({"run_id": name, "mode": name.split("-", 2)[2], "status": "ok",
-                                              "started_at": 0.0, "ended_at": 60.0, "code_rev": "abc", "code_dirty": dirty}))
+        _run_json(tmp_path / name, mode=name.split("-", 2)[2], status="ok", started_at=0.0,
+                  ended_at=60.0, code_rev="abc", code_dirty=dirty)
 
     # ### When
-    table = compare_table(find_run_dirs(str(tmp_path)))
+    lines = compare_table(find_run_dirs(str(tmp_path))).splitlines()
 
     # ### Then
-    lines = table.splitlines()
     assert lines[0].split()[0] == "run"
     assert len(lines) == 3
-    assert "abc*" in lines[1] or "abc*" in lines[2]
     assert "modal-cpu" in lines[1] and "local-cpu" in lines[2]
-
-
-def test_recorder_keeps_only_milestones(tmp_path: Path) -> None:
-    """
-    Scenario: the trainer logs every 10 steps; only every 500th step and core/ChatCORE points are written.
-    Slice: the run folder stays small however often the trainer logs.
-    """
-    # ### Given
-    recorder = RunRecorder(str(tmp_path))
-
-    # ### When
-    for step in range(10, 1001, 10):
-        recorder.log({"step": step, "train/loss": 1.0})
-    recorder.log({"step": 530, "core_metric": 0.1})
-
-    # ### Then
-    kept = [e["data"]["step"] for e in read_events(str(tmp_path))]
-    assert kept == [500, 1000, 530]
+    assert "abc*" in lines[1]

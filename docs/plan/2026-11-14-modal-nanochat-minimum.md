@@ -186,12 +186,12 @@ Forbidden: detect Modal via hostname/`/data`; import `modal` from `_stage_lib`/s
 | Where | What | Written by |
 |-------|------|------------|
 | Local `~/.cache/nanochat-modal/runs/<run-id>/run.log` | Full run log | `runs/runmodal.sh` (tee) |
-| Volume `runs/<run-id>/config.json` | Settings used: cores, memory, batch, eval batch, steps, timeout, code revision, mode | `train_cpu` at start |
-| Volume `runs/<run-id>/report.json` | Resource report: wall time, cores busy vs requested, peak memory, verdicts | `train_cpu` at end |
+| Volume `runs/<run-id>/run.json` | Config (trainer's and launcher's), code revision, host, resources, status | trainer at start, `train_cpu` at end |
+| Volume `runs/<run-id>/events.jsonl` | Stage spans and milestone metrics (see §1f) | stage runner and trainer |
 | Volume `runs/<run-id>/manifest.json` | Every archived file with size and SHA-256 | `_archive_artifacts` |
 | Volume `runs/<run-id>/artifacts/` | Copy of tokenizer, base and SFT checkpoints, `last_metrics.json`, `.stage_elapsed` | `_archive_artifacts` |
 
-**Run id:** UTC timestamp plus mode, e.g. `20261114-130522-cpu`. **Code revision:** the short git commit that built the run, recorded in `config.json`.
+**Run id:** UTC timestamp plus mode, e.g. `20261114-130522-cpu`. **Code revision:** the short git commit that built the run, recorded in `run.json`.
 
 **Commands (`runs/modal_peek.sh`, read-only):**
 
@@ -241,7 +241,7 @@ Recorded so the plan matches what happened. Status is as of commit `8c28ee9`.
 
 **Verified in this session:** CPU image builds on Modal (about 19 s); CPU functions create with no payment error; 64 cores visible in the container; peek script (`status`, `past`, `info`, `logs`, `container`, `-f`); run 5 reached step 40+ on the CPU path; local and Modal config resolution (batch 8/5000 locally, 32/5000 on Modal).
 
-**Not yet verified:** the full CPU run end to end, `report.json` on a finished run, the chat tip on the Mac, billing stop, and `compare` output with data.
+**Not yet verified:** the full CPU run end to end, the resource report in `run.json` on a finished run, the chat tip on the Mac, billing stop, and `compare` output with data.
 
 ## 1e. Session review: GPU phase, shell fixes and merge gate (2026-11-14, earlier)
 
@@ -268,42 +268,40 @@ Recorded so the plan matches what happened. Status is as of commit `8c28ee9`.
 
 **Merge gate (decided here):** a PR merges to `master` only when (a) the user says so, (b) CI or local checks pass on the exact head commit, and (c) every reviewer that approved has seen that head commit. Autonomous runs open PRs and stop.
 
-## 1e. Run record: metrics, spans and config for every run (local or Modal, CPU or GPU)
+## 1f. Run record: config, timings, quality for every run (local or Modal, CPU or GPU)
 
-**Why:** we could not answer basic questions after the fact: how long did each stage take, what config and code produced this result, how fast was each step, what quality did it reach. Results were in terminal text, overwritten files and chat logs (§1d items 14, 16, 20). One record per run fixes that.
+**Why:** we could not answer basic questions after the fact: how long each stage took, what config and code produced a result, how fast each step was, what quality it reached. Results were in terminal text, overwritten files and chat logs (§1d items 14, 16, 20).
 
-**Design (stdlib only, `nanochat/run_record.py`):**
+**Design (stdlib only, `nanochat/run_record.py`, the single writer):**
 
 ```
 <run-dir>/            local: ~/.cache/nanochat/runs/<run-id>   Modal: Volume runs/<run-id>
-  run.json            identity, mode, code rev (+ dirty flag), host, env overrides, config, status, times
-  events.jsonl        stage and hook spans (shell), milestone metrics (trainers)
-  summary.json        derived: wall time, stage durations, hook wait, s/step p50/p95, tok/s,
-                      first-metric latency, val bpb (min, last), CORE, ChatCORE, status
+  run.json            config (trainer + launcher), code rev and dirty flag, host, resources (Modal),
+                      status (running | ok | fail), start and end times
+  events.jsonl        one span per stage (duration, hook time, status); milestone metrics only
 ```
 
-- **Metrics:** the trainers already call `wandb_run.log(...)`. `make_run_logger` tees that call to the record and to the existing backend (wandb or dummy). Nothing is parsed from text logs.
-- **Spans:** `run_stage` writes one span per stage, and the post-stage hook writes one span per hook (this is the commit wait on Modal).
-- **Not flooding the folder:** metric points are kept only at milestones: every 500 steps, plus every CORE and ChatCORE evaluation. A 5000-step run keeps about 10 metric lines, not one per log call. Stage and hook spans are a handful per run.
-- **Status honesty:** `run.json` starts as `running`. A run that never calls `finish` (killed, timed out) shows as `running` with no end time, not `ok`.
-- **Comparison:** `python3 -m nanochat.run_record compare <root>` for any folder of runs. `runs/modal_peek.sh compare` builds the same table from the Volume.
-- **Wiring:** `runcpu.sh` and `speedrun.sh` default to a local run folder. Modal sets `NANOCHAT_RUN_DIR` to its Volume folder and passes the commit in (`NANOCHAT_CODE_REV`, since the image has no `.git`).
-- **Failure rule:** if the run record cannot start, the script warns and training continues. Observability must not stop a run.
+- **Config:** the trainer's own config is recorded through the logger it already uses. The launcher adds only what the trainer cannot see (cores, memory, timeout). Nothing is recorded twice.
+- **Spans:** `run_stage` writes one span per stage through `python3 -m nanochat.run_record span`. The post-stage hook time (the Modal commit wait) is a field on that span, not a separate span.
+- **Metrics:** the trainers' existing `wandb_run.log` calls are teed to the record. Points are kept only every 500 steps and at every CORE / ChatCORE evaluation.
+- **Summaries are not stored.** `summarize()` and `compare` compute them from `run.json` and `events.jsonl` on demand, so they cannot go stale.
+- **Status:** `running` until the run calls `finish`. A killed or timed-out run stays `running`, never `ok`.
+- **Failure rule:** if the record cannot be written, the script warns and training continues. Observability must not stop a run.
+
+**What was removed to keep it lean:** `config.json`, `report.json` and `summary.json` (now `run.json` and on-demand summaries), per-hook spans, `first_metric_latency`, a copy of the environment overrides (already in the trainer's config), and the Python version (not a run variable).
 
 **Gaps still open:**
 
 | # | Gap | Action |
 |---|-----|--------|
 | 1 | Runs before this change (`20261114-125440-cpu` and earlier) have no `run.json`, so `compare` does not list them | Accepted; their logs and archive remain |
-| 2 | Config is written three ways: `run.json`, `config.json`, `report.json` (CPU path) | Single source later: fold `config.json` and `report.json` into `run.json`/`summary.json` |
-| 3 | GPU runs have a run record but no checkpoint archive | Port §1c archive to the GPU path in the GPU phase |
-| 4 | No cost on the record. The estimate in §1d item 7 is still unverified | Add `est_cost_usd` once rates are checked with `modal billing rates` |
-| 5 | Milestone sampling every 500 steps means a short run has few points | Tune `SAMPLE_EVERY` per run if a study needs finer curves |
-| 6 | Trainer `dt` is logged only at milestones, so step-time percentiles come from about 10 samples | Acceptable for now; add a cheap timing field if percentiles need more |
-| 7 | Live progress is not visible in the record until a milestone is written or the Volume is committed | Use `modal_peek.sh logs -f` for live view |
-| 8 | Not yet verified end to end on a real run | Check the first run after this change: `summary.json`, `compare`, and `pull` |
+| 2 | GPU runs have a run record but no checkpoint archive | Port the §1c archive to the GPU path in the GPU phase |
+| 3 | No cost on the record. The estimate in §1d item 7 is still unverified | Add `est_cost_usd` once rates are checked with `modal billing rates` |
+| 4 | Milestone sampling every 500 steps means a short run has few points | Tune `SAMPLE_EVERY` per run if a study needs finer curves |
+| 5 | Live progress is not in the record until a milestone is written or the Volume is committed | Use `modal_peek.sh logs -f` for the live view |
+| 6 | Not yet verified end to end on a real run | Check the first run after this change: `run.json`, `events.jsonl`, `compare` |
 
-**Done when:** a local run and a Modal run each produce `run.json`, milestone `events.jsonl`, and `summary.json`; `compare` lists both with device, code rev, duration, tok/s, val bpb and CORE; and the record stays under about 100 lines per run.
+**Done when:** a local run and a Modal run each produce `run.json` and `events.jsonl` with one span per stage; `compare` lists both with device, code rev, duration, tok/s, val bpb and CORE; and a run folder stays under about 100 lines.
 
 ## 2. Non-goals
 
