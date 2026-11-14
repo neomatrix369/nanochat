@@ -8,7 +8,16 @@
 
 set -euo pipefail
 
-BASE_DIR="${NANOCHAT_BASE_DIR}"
+case "${1:-}" in
+    -h|--help|help)
+        echo "modal_hook.sh: post-stage commit hook. Not for manual use."
+        echo "It runs from _stage_lib.sh (via NANOCHAT_POST_STAGE_HOOK) inside a Modal run."
+        echo "It writes a commit request and waits for the daemon in runs/modal_run.py."
+        exit 0
+        ;;
+esac
+
+BASE_DIR="${NANOCHAT_BASE_DIR:?NANOCHAT_BASE_DIR is not set. This hook runs from _stage_lib.sh inside a Modal run; run 'bash runs/modal_hook.sh help' for usage.}"
 HEARTBEAT_FILE="$BASE_DIR/.modal_commit_heartbeat"
 REQUEST_FILE="$BASE_DIR/.modal_commit_request"
 FAILED_FILE="$BASE_DIR/.modal_commit_failed"
