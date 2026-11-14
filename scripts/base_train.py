@@ -30,7 +30,7 @@ from nanochat.defaults import DEFAULT_DEPTH, DEFAULT_DEVICE_BATCH_SIZE, DEFAULT_
 from nanochat.memory import auto_fit_echo_lines, auto_fit_enabled, empty_device_cache, fit_device_batch_size, format_oom_retry_line, is_out_of_memory_error, oom_after_rehalve_error, oom_rehalve_once, training_module_after_oom_rehalve
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, maybe_torch_compile
+from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, maybe_torch_compile, format_duration
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
@@ -674,11 +674,11 @@ while True:
         avg_time_per_step = total_training_time / steps_done
         remaining_steps = num_iterations - step
         eta_seconds = remaining_steps * avg_time_per_step
-        eta_str = f" | eta: {eta_seconds/60:.1f}m"
+        eta_str = f" | eta: {format_duration(eta_seconds)}"
     else:
         eta_str = ""
     epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {format_duration(total_training_time)}{eta_str}")
     if step % 100 == 0:
         log_data = {
             "step": step,
@@ -709,7 +709,7 @@ while True:
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
-print0(f"Total training time: {total_training_time/60:.2f}m")
+print0(f"Total training time: {format_duration(total_training_time)}")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
