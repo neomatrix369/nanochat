@@ -609,6 +609,14 @@ def _select_chat_files(sizes: dict[str, int], mode: str) -> list[str]:
     When run-id tag folders exist (timestamp-prefixed), only the newest run's folder is kept.
     """
     picked = [p for p in sizes if p.startswith(f"{mode}/tokenizer/") or p in (f"{mode}/chatsft_checkpoints/.train_ok", f"{mode}/last_run.json")]
+    # Also pick hparams.json from base_checkpoints/<tag>/ and chatsft_checkpoints/<tag>/
+    # (tokenizer/hparams.json is already included via the tokenizer/ prefix above)
+    #
+    # NOTE: base_eval hparams ({model_slug}_hparams.json under base_eval/) are intentionally
+    # excluded — they are evaluation config, not needed for chat inference locally. They remain
+    # on the Volume for auditing training + eval recipes but are not pulled by default.
+    _hparams_pat = re.compile(rf"{re.escape(mode)}/(base_checkpoints|chatsft_checkpoints)/[^/]+/hparams\.json$")
+    picked += [p for p in sizes if _hparams_pat.match(p)]
     kinds_by_tag: dict[str, dict[int, set[str]]] = {}
     for path in sizes:
         match = re.fullmatch(rf"{re.escape(mode)}/chatsft_checkpoints/([^/]+)/(model|meta)_(\d+)\.(?:pt|json)", path)

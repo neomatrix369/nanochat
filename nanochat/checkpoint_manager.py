@@ -31,6 +31,21 @@ _SOURCE_HINTS = {
     "rl": "run scripts/chat_rl.py first (after chat_sft)",
 }
 
+def _modal_suggestion(source):
+    """Return a suggestion line if a Modal artifact dir has the needed checkpoints, else empty string."""
+    sub = _SOURCE_DIRS.get(source, "")
+    if not sub:
+        return ""
+    home = os.path.expanduser("~")
+    for mode in ("cpu", "gpu"):
+        candidate = os.path.join(home, ".cache", "nanochat-modal", mode, sub)
+        if os.path.isdir(candidate):
+            return (
+                f"\n  Found Modal {mode.upper()} artifacts. Try:"
+                f"\n    NANOCHAT_BASE_DIR=~/.cache/nanochat-modal/{mode} uv run python -m scripts.chat_cli -p \"<prompt>\""
+            )
+    return ""
+
 def _require_dir(path, source=None):
     """Raise a FileNotFoundError that says what is missing and how to get it."""
     if os.path.isdir(path):
@@ -38,6 +53,7 @@ def _require_dir(path, source=None):
     msg = f"Checkpoint directory not found: {path}"
     if source is not None:
         msg += f"\n  Expected source: '{source}' ({_SOURCE_DIRS[source]}/). Hint: {_SOURCE_HINTS[source]}."
+        msg += _modal_suggestion(source)
     msg += f"\n  Base dir: {get_base_dir()} (override with NANOCHAT_BASE_DIR). See docs/RUNNING.md."
     raise FileNotFoundError(msg)
 
@@ -59,6 +75,19 @@ def _patch_missing_keys(model_data, model_config):
     if "x0_lambdas" not in model_data:
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0("Patching missing x0_lambdas in model data to 0.0")
+
+def _write_json_best_effort(path: str, obj: dict, label: str) -> None:
+    """Write a JSON file, logging a warning on failure instead of crashing.
+
+    Use for informational metadata (hparams, eval records) that must not abort an
+    otherwise-successful training or eval run when disk is full or the volume is ro.
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        log0(f"[hparams] {label} written → {path}")
+    except OSError as e:
+        log0(f"[hparams] WARNING: could not write {label} ({e}); continuing")
 
 def _atomic_write(path, write_fn):
     # A killed write leaves only *.tmp, which find_safe_resume_step never matches.
