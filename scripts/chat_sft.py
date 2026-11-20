@@ -12,7 +12,6 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 import argparse
 import datetime
 import gc
-import json
 import os
 import time
 
@@ -24,6 +23,7 @@ import wandb
 
 from nanochat.checkpoint_manager import (
     SFT_RESUME_KEYS,
+    _write_json_best_effort,
     apply_sft_resume_state,
     assert_resume_config_matches,
     find_safe_resume_step,
@@ -226,9 +226,7 @@ if master_process:
     }
     os.makedirs(checkpoint_dir, exist_ok=True)
     _sft_hparams_path = os.path.join(checkpoint_dir, "hparams.json")
-    with open(_sft_hparams_path, "w") as f:
-        json.dump(_sft_hparams, f, indent=2)
-    print0(f"[hparams] SFT configuration written → {_sft_hparams_path}")
+    _write_json_best_effort(_sft_hparams_path, _sft_hparams, "SFT configuration")
 
 # Use pre-detected resume step (banner already printed above if resuming)
 if args.resume_from_step == -1:

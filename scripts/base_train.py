@@ -30,6 +30,7 @@ import wandb
 
 from nanochat.checkpoint_manager import (
     BASE_TRAIN_RESUME_KEYS,
+    _write_json_best_effort,
     assert_resume_config_matches,
     load_checkpoint,
     remove_stale_tmp,
@@ -496,9 +497,7 @@ if master_process:
     }
     os.makedirs(checkpoint_dir, exist_ok=True)
     _hparams_path = os.path.join(checkpoint_dir, "hparams.json")
-    with open(_hparams_path, "w") as f:
-        json.dump(_hparams, f, indent=2)
-    print0(f"[hparams] training configuration written → {_hparams_path}")
+    _write_json_best_effort(_hparams_path, _hparams, "training configuration")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):

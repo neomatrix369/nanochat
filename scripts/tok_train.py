@@ -4,12 +4,12 @@ In the style of GPT-4 tokenizer.
 """
 import argparse
 import datetime
-import json
 import os
 import time
 
 import torch
 
+from nanochat.checkpoint_manager import _write_json_best_effort
 from nanochat.common import get_base_dir
 from nanochat.dataset import parquets_iter_batched
 from nanochat.glossary import emit_define
@@ -76,9 +76,7 @@ hparams = {
     "train_time_secs": round(train_time, 2),
 }
 hparams_path = os.path.join(tokenizer_dir, "hparams.json")
-with open(hparams_path, "w") as f:
-    json.dump(hparams, f, indent=2)
-print(f"Saved hparams to {hparams_path}")
+_write_json_best_effort(hparams_path, hparams, "tokenizer configuration")
 
 # -----------------------------------------------------------------------------
 # Quick inline sanity check

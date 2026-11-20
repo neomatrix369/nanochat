@@ -29,7 +29,7 @@ import zipfile
 
 import yaml
 
-from nanochat.checkpoint_manager import load_model
+from nanochat.checkpoint_manager import _write_json_best_effort, load_model
 from nanochat.common import (
     autodetect_device_type,
     compute_cleanup,
@@ -211,9 +211,7 @@ def main():
         _eval_dir = os.path.join(get_base_dir(), "base_eval")
         os.makedirs(_eval_dir, exist_ok=True)
         _eval_hparams_path = os.path.join(_eval_dir, f"{model_slug}_hparams.json")
-        with open(_eval_hparams_path, "w") as f:
-            json.dump(_eval_hparams, f, indent=2)
-        print0(f"[hparams] eval configuration written → {_eval_hparams_path}")
+        _write_json_best_effort(_eval_hparams_path, _eval_hparams, "eval configuration")
 
     # Results to log
     core_results = None

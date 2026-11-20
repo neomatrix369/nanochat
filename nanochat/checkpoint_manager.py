@@ -76,6 +76,19 @@ def _patch_missing_keys(model_data, model_config):
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0("Patching missing x0_lambdas in model data to 0.0")
 
+def _write_json_best_effort(path: str, obj: dict, label: str) -> None:
+    """Write a JSON file, logging a warning on failure instead of crashing.
+
+    Use for informational metadata (hparams, eval records) that must not abort an
+    otherwise-successful training or eval run when disk is full or the volume is ro.
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        log0(f"[hparams] {label} written → {path}")
+    except OSError as e:
+        log0(f"[hparams] WARNING: could not write {label} ({e}); continuing")
+
 def _atomic_write(path, write_fn):
     # A killed write leaves only *.tmp, which find_safe_resume_step never matches.
     tmp_path = path + ".tmp"

@@ -10,14 +10,17 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -i sft -a ARC-Easy
 
 import argparse
 import datetime
-import json
 import os
 from functools import partial
 
 import torch
 import torch.distributed as dist
 
-from nanochat.checkpoint_manager import load_model
+from nanochat.checkpoint_manager import (
+    _write_json_best_effort,
+    find_largest_model,
+    load_model,
+)
 from nanochat.common import (
     autodetect_device_type,
     compute_cleanup,
@@ -212,6 +215,10 @@ if __name__ == "__main__":
     # Same tag rule as chat_cli: the most recent completed run when no -g is given.
     model_tag = resolve_chat_model_tag(get_base_dir(), args.source, args.model_tag)
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=model_tag, step=args.step)
+    # load_model resolves model_tag internally when None; re-derive so the output path is never None.
+    if model_tag is None:
+        checkpoints_dir = os.path.join(get_base_dir(), "chatsft_checkpoints")
+        model_tag = find_largest_model(checkpoints_dir)
     engine = Engine(model, tokenizer)
 
     # Get the tasks to evaluate on
@@ -243,6 +250,7 @@ if __name__ == "__main__":
 
     # calculate the ChatCORE metric if we can (similar to CORE, it's the mean centered accuracy)
     # this way, ChatCORE ranges from 0 (at random baseline) to 1 (peak performance)
+    chatcore_metric = None
     all_tasks_were_evaluated = all(task_name in results for task_name in all_tasks)
     if all_tasks_were_evaluated:
         centered_mean = 0
@@ -270,10 +278,9 @@ if __name__ == "__main__":
         os.makedirs(ckpt_dir, exist_ok=True)
         step_str = f"{step:06d}" if step is not None else "unknown"
         out_path = os.path.join(ckpt_dir, f"chatcore_{step_str}.json")
-        with open(out_path, "w") as f:
-            json.dump(record, f, indent=2)
-        print0(f"[eval] results written → {out_path}")
+        _write_json_best_effort(out_path, record, f"eval results (step {step_str})")
 
-        # marker: last action of a successful run
+        # marker: last action of a successful run — written even if the JSON above failed
         marker_dir = os.path.join(get_base_dir(), "chatsft_checkpoints")
+        os.makedirs(marker_dir, exist_ok=True)
         open(os.path.join(marker_dir, ".eval_ok"), "w").close()
