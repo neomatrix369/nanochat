@@ -356,7 +356,7 @@ Tasks and their type:
 
 ChatCORE is the mean centered accuracy across all 5 tasks (0 = random, 1 = perfect). It prints only when all 5 tasks are evaluated. Use `-a` to focus on one task; the aggregate metric is skipped when fewer than all 5 tasks run.
 
-**Results are saved automatically** to `chatsft_checkpoints/<model-tag>/chatcore_<step>.json` in `NANOCHAT_BASE_DIR`. Example for the Modal CPU run after download:
+**Results are saved automatically** when you run `scripts.chat_eval` standalone — to `chatsft_checkpoints/<model-tag>/chatcore_<step>.json` in `NANOCHAT_BASE_DIR`. (Inline ChatCORE inside `runcpu.sh` logs to wandb only, not to disk — see the note above.) Example for the Modal CPU run after download:
 
 ```
 ~/.cache/nanochat-modal/cpu/chatsft_checkpoints/20261116-154817-cpu-d6/chatcore_001499.json
@@ -425,19 +425,28 @@ import json, os
 base_dir = os.environ.get("NANOCHAT_BASE_DIR", os.path.expanduser("~/.cache/nanochat"))
 
 # Tokenizer training params
-with open(f"{base_dir}/tokenizer/hparams.json") as f:
-    tok_hparams = json.load(f)
+try:
+    with open(f"{base_dir}/tokenizer/hparams.json") as f:
+        tok_hparams = json.load(f)
+except FileNotFoundError:
+    print("tokenizer/hparams.json not found — run tok_train first")
 
 # Base training params (replace <tag> with the run id or depth, e.g. d6)
-with open(f"{base_dir}/base_checkpoints/<tag>/hparams.json") as f:
-    base_hparams = json.load(f)
-print(base_hparams["training"]["total_batch_size"])
-print(base_hparams["model"]["total"])          # total param count
+try:
+    with open(f"{base_dir}/base_checkpoints/<tag>/hparams.json") as f:
+        base_hparams = json.load(f)
+    print(base_hparams["training"]["total_batch_size"])
+    print(base_hparams["model"]["total"])          # total param count
+except FileNotFoundError:
+    print("base_checkpoints/<tag>/hparams.json not found — run base_train first")
 
 # SFT training params
-with open(f"{base_dir}/chatsft_checkpoints/<tag>/hparams.json") as f:
-    sft_hparams = json.load(f)
-print(sft_hparams["training"]["num_iterations"])
+try:
+    with open(f"{base_dir}/chatsft_checkpoints/<tag>/hparams.json") as f:
+        sft_hparams = json.load(f)
+    print(sft_hparams["training"]["num_iterations"])
+except FileNotFoundError:
+    print("chatsft_checkpoints/<tag>/hparams.json not found — run chat_sft first")
 ```
 
 ### Modal CPU / GPU runs
@@ -454,4 +463,9 @@ Point `NANOCHAT_BASE_DIR` at the downloaded folder and use the same Python snipp
 
 ### On resume
 
-Hparams are written at stage start regardless of resume. The resume guard in `base_train.py` and `chat_sft.py` refuses to continue if key dimensions changed, so the file always reflects the effective config for that run.
+Hparams are written at stage start regardless of resume. The resume guard in `base_train.py` and `chat_sft.py` checks key dimensions (e.g. `device_batch_size`, `max_seq_len`) **before** `hparams.json` is rewritten. If the check fails, the stage exits with an error and `hparams.json` is not overwritten, so the file on disk still reflects the original run's config. If the check passes (dimensions unchanged), `hparams.json` is refreshed with the same effective values and training continues.
+
+To restart a stage from step 0 with different settings, force it explicitly:
+```bash
+FORCE_STAGES=base_train bash runs/runcpu.sh   # or speedrun.sh
+```

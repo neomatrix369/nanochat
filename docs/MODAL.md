@@ -255,7 +255,7 @@ This copies the tokenizer and the newest chat checkpoint to `~/.cache/nanochat-m
   - `base_checkpoints/<run-id>/hparams.json` — base training hyperparameters (if present on the Volume)
 - ~8 GB of free disk space and ~4 GB of free RAM (to load the checkpoint).
 
-> **Hyperparameters:** `modal_peek.sh pull` downloads all `hparams.json` files alongside model weights. See [RUNNING.md §15](RUNNING.md#15-hyperparameters) for the file schema and how to read them programmatically.
+> **Hyperparameters:** `modal_peek.sh pull` downloads `tokenizer/`, `base_checkpoints/`, and `chatsft_checkpoints/` hparams.json files alongside model weights. `base_eval/` hparams (`base_eval/<slug>_hparams.json`) are evaluation config not needed for chat and are intentionally not downloaded — they remain on the Volume. See [RUNNING.md §15](RUNNING.md#15-hyperparameters) for the file schema and how to read them programmatically.
 
 Check for these files with `find ~/.cache/nanochat-modal/<mode> -type f`. If any are missing, follow [Pull the models from the Volume by hand](#pull-the-models-from-the-volume-by-hand). Auto-download on success is not yet reliable, so do not assume it ran.
 

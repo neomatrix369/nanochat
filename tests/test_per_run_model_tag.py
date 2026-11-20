@@ -43,6 +43,50 @@ def test_modal_picker_selects_run_id_folder():
     assert f"cpu/chatsft_checkpoints/{tag}/meta_000100.json" in picked
 
 
+# --- hparams.json download coverage ---
+
+# Scenario: base_checkpoints hparams must be downloaded alongside model weights.
+def test_modal_picker_includes_base_checkpoints_hparams():
+    # Given a Volume listing with hparams.json under a base_checkpoints tag folder
+    sizes = _listing(
+        "cpu/base_checkpoints/d6/hparams.json",
+        "cpu/chatsft_checkpoints/d6/model_000100.pt",
+        "cpu/chatsft_checkpoints/d6/meta_000100.json",
+    )
+    # When the picker selects chat files
+    picked = modal_run._select_chat_files(sizes, "cpu")
+    # Then the base checkpoint hparams are included
+    assert "cpu/base_checkpoints/d6/hparams.json" in picked
+
+
+# Scenario: chatsft_checkpoints hparams must also be downloaded.
+def test_modal_picker_includes_chatsft_checkpoints_hparams():
+    # Given a Volume listing with hparams.json under a chatsft_checkpoints tag folder
+    sizes = _listing(
+        "cpu/chatsft_checkpoints/d6/hparams.json",
+        "cpu/chatsft_checkpoints/d6/model_000100.pt",
+        "cpu/chatsft_checkpoints/d6/meta_000100.json",
+    )
+    # When the picker selects chat files
+    picked = modal_run._select_chat_files(sizes, "cpu")
+    # Then the SFT checkpoint hparams are included
+    assert "cpu/chatsft_checkpoints/d6/hparams.json" in picked
+
+
+# Scenario: base_eval hparams live under base_eval/ and are not needed for chat; excluded by design.
+def test_modal_picker_excludes_base_eval_hparams():
+    # Given a Volume listing with an eval hparams file (different directory, different naming)
+    sizes = _listing(
+        "cpu/base_eval/base_model_000100_hparams.json",
+        "cpu/chatsft_checkpoints/d6/model_000100.pt",
+        "cpu/chatsft_checkpoints/d6/meta_000100.json",
+    )
+    # When the picker selects chat files
+    picked = modal_run._select_chat_files(sizes, "cpu")
+    # Then base_eval hparams are NOT included (eval config not needed for inference)
+    assert "cpu/base_eval/base_model_000100_hparams.json" not in picked
+
+
 # Scenario: last_run.json must come down with the checkpoints so chat without -g works locally.
 def test_modal_picker_includes_last_run_json():
     # Given a listing that contains last_run.json and a complete pair
